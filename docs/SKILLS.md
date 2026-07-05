@@ -310,7 +310,8 @@ MR mở         → bot chưa review        → 0/1 approval → BLOCKED 🚫
 Bot review:
   → APPROVE          → bot approve      → 1/1 approval → UNBLOCKED ✅ → merge được
   → REQUEST_CHANGES  → bot unapprove    → 0/1          → BLOCKED 🚫 → fix critical → re-review
-Push commit mới → GitLab reset approval → BLOCKED → bot re-review
+Push commit mới → bot unapprove NGAY → BLOCKED → bot re-review → re-approve/unapprove
+                  (đảm bảo MR blocked trong window review lại)
 ```
 
 ### Việc của bạn

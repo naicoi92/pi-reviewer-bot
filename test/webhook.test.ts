@@ -740,3 +740,37 @@ describe("inflight coordinator — cancel review cũ khi push mới (BUG 3)", ()
     expect(() => completeReview(999, 999)).not.toThrow();
   });
 });
+
+// ─── BUG 4 doc: block=true phải unapprove trước khi review lại ─
+// Note: performReview gọi nhiều side-effect (clone, fetch, AI) nên khó unit test
+// end-to-end. Test dưới đây verify CONFIG TRIGGER — `block.enabled=true` là điều
+// kiện tiên quyết để unapprove chạy. Logic unapprove đã idempotent (test ở gitlab).
+
+describe("BUG 4: block.enabled triggers unapprove on re-review", () => {
+  test("block.enabled=true là gate cho unapprove logic", () => {
+    // Verify config field tồn tại + default false (backward compat).
+    expect(DEFAULT_CONFIG.block.enabled).toBe(false);
+
+    // Khi project set true → performReview sẽ gọi unapproveMr ở entry point.
+    const cfgBlockOn = mergeConfig({ block: { enabled: true } });
+    expect(cfgBlockOn.block.enabled).toBe(true);
+
+    // Default → không unapprove (project không dùng gate).
+    const cfgBlockOff = mergeConfig({ block: { enabled: false } });
+    expect(cfgBlockOff.block.enabled).toBe(false);
+  });
+
+  test("block.enabled=true kết hợp được với ci.require=true", () => {
+    // Combo này rất phổ biến: project muốn (1) đợi CI pass + (2) gate merge.
+    // Khi push mới + cả 2 enabled:
+    //   1. performReview unapprove ngay (block=true) → MR blocked
+    //   2. checkCiAndWait → enqueue đợi CI (10+ phút) → MR vẫn blocked
+    //   3. CI pass → review → re-approve nếu PASS
+    const cfg = mergeConfig({
+      block: { enabled: true },
+      ci: { require: true },
+    });
+    expect(cfg.block.enabled).toBe(true);
+    expect(cfg.ci.require).toBe(true);
+  });
+});

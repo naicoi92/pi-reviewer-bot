@@ -159,9 +159,19 @@ Sau đó **phải setup Approval Rule trong GitLab project** (xem [`docs/SETUP.m
 Workflow:
 1. MR mở → bot unapprove (chưa review) → MR **blocked**
 2. Bot review xong → verdict APPROVE → bot approve → MR **unblocked**
-3. Author push commit mới → GitLab reset approval → bot re-review → approve/unapprove
+3. Author push commit mới → **bot unapprove ngay lập tức** (revoke approval cũ)
+   → MR **blocked** trong suốt window review lại (tránh merge code chưa review)
+   → bot re-review → approve/unapprove
+4. CI wait mode + push mới: bot unapprove trước khi enqueue đợi CI → MR
+   blocked trong 10+ phút đợi CI, không chỉ trong window review
 
 Override: user có thể manually approve trong GitLab UI để merge khẩn cấp (bot không chặn vật lý).
+
+> 💡 **Tại sao unapprove trước?** GitLab có project setting "Reset approval on
+> push" — nếu OFF, approval cũ (cho SHA trước) vẫn còn hiệu lực sau push. Bot
+> unapprove đảm bảo MR blocked kể cả khi project tắt option đó. Unapprove là
+> idempotent (404/405 = không có approval → coi như thành công) → an toàn cho MR
+> mở lần đầu.
 
 ### Project muốn review chỉ khi CI pass
 
