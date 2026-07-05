@@ -1,10 +1,11 @@
 # Integration Guide — Setup pi-reviewer-bot cho project của bạn
 
-> **Audience**: AI agent (Claude Code, Cursor, Pi, Codex) hoặc dev đang làm việc trong
-> **repo khác** và muốn enable AI code review cho repo đó.
+> **Audience**: Project owner / AI agent (Claude Code, Cursor, Pi, Codex) đang làm việc trong
+> **repo GitLab khác** và muốn enable AI code review cho repo đó.
 >
 > Doc này hướng dẫn từng bước để tích hợp pi-reviewer-bot vào project —
->không phải setup bản thân bot service (xem [SETUP.md](SETUP.md) cho việc đó).
+> **không phải setup bản thân bot service**. Nếu bạn cần deploy bot, xem
+> [SETUP.md](SETUP.md) trước, rồi quay lại đây.
 
 ## TL;DR — 3 bước
 

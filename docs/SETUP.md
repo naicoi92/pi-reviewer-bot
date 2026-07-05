@@ -1,8 +1,15 @@
-# Setup Guide — pi-reviewer-bot
+# Deploy Guide — pi-reviewer-bot
 
-Bot webhook service nhận GitLab MR events → spawn Pi Coding Agent review với Z.ai GLM-5.2 → post comments + approve/request_changes.
+> **Audience**: Dev ops / SRE / self-hoster — người **deploy bot service**.
+>
+> Nếu bạn muốn **dùng bot cho project GitLab của mình** (không phải deploy),
+> xem [INTEGRATION.md](INTEGRATION.md) thay vì doc này.
 
-**Deploy anywhere**: Docker container chạy được trên VPS, homelab, Kubernetes, ECS, hoặc local. Không lock-in cloud cụ thể.
+Bot webhook service nhận GitLab MR events → spawn Pi Coding Agent review với LLM
+bất kỳ (Z.ai GLM, OpenAI GPT, Anthropic Claude, ...) → post comments + approve/request_changes.
+
+**Deploy anywhere**: Docker container chạy được trên VPS, homelab, Kubernetes, ECS,
+hoặc local. Không lock-in cloud cụ thể.
 
 ## 0. Prerequisites
 
@@ -24,7 +31,7 @@ git clone https://github.com/naicoi92/pi-reviewer-bot.git
 cd pi-reviewer-bot
 
 # Build multi-arch hoặc single-arch
-docker build -t pi-reviewer-bot:latest -f Dockerfile .
+docker build -t pi-reviewer-bot:latest .
 
 # Verify
 docker images pi-reviewer-bot --format "{{.Repository}}:{{.Tag}} — {{.Size}}"

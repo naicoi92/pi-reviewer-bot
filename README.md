@@ -8,6 +8,123 @@
 
 Bot hỗ trợ **bất kỳ LLM provider nào** Pi hỗ trợ (40+): Z.ai GLM, OpenAI GPT, Anthropic Claude, DeepSeek, Google Gemini, Bedrock, Vertex, Ollama... Bạn chỉ cần set API key của provider muốn dùng.
 
+## Documentation
+
+| Doc | Audience | Purpose |
+|---|---|---|
+| **[📖 Deploy Guide](docs/SETUP.md)** | Dev ops / SRE | Build image, run container (Docker/K8s/systemd), expose webhook |
+| **[📖 Integration Guide](docs/INTEGRATION.md)** | AI agent / project owner | Setup bot cho project GitLab của bạn (`.pi/config.yaml`, agent prompt, webhook) |
+| **[📖 Config Schema](docs/CONFIG.md)** | Project owner | `.pi/config.yaml` full schema + examples |
+| **[📖 Architecture](docs/ARCHITECTURE.md)** | Maintainer | Design decisions, decision log (D1-D9) |
+| **[📖 Multi-project Ops](docs/MULTIPROJECT.md)** | Ops | Vận hành bot cho nhiều project |
+
+---
+
+## 🚀 Deploy bot (cho dev ops)
+
+Bot chạy dạng Docker container. 3 bước:
+
+### Bước 1 — Pull hoặc build image
+
+```bash
+# Pull từ GHCR (recommend)
+docker pull ghcr.io/naicoi92/pi-reviewer-bot:latest
+
+# Hoặc build từ source
+git clone https://github.com/naicoi92/pi-reviewer-bot.git
+cd pi-reviewer-bot
+docker build -t pi-reviewer-bot:latest .
+```
+
+### Bước 2 — Configure env
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`, set 3 biến bắt buộc:
+
+```bash
+WEBHOOK_SECRET=$(openssl rand -hex 16)        # random, dùng cho GitLab webhook
+GITLAB_API_TOKEN=glpat-xxxxxxxxxxxxxxxx        # bot PAT, scope: api
+ZAI_API_KEY=zai-xxxxxxxx                       # hoặc OPENAI_API_KEY/ANTHROPIC_API_KEY/...
+```
+
+Set thêm `DEFAULT_MODEL=provider/model` nếu muốn lock provider cụ thể. Bỏ trống → Pi auto-detect.
+
+### Bước 3 — Run + expose webhook URL
+
+```bash
+# Docker Compose (recommend production)
+docker compose up -d
+
+# Hoặc Docker run
+docker run -d --name pi-reviewer-bot -p 3000:3000 --env-file .env \
+  -v pi-reviews-cache:/tmp/pi-reviews pi-reviewer-bot:latest
+```
+
+Expose public URL để GitLab gọi webhook:
+- **VPS có public IP**: Caddy/Nginx reverse proxy → `https://pi-bot.yourdomain.com`
+- **VPS không public IP**: Cloudflare Tunnel → free HTTPS
+- **Local dev**: localtunnel / ngrok
+
+📖 **Chi tiết đầy đủ**: [docs/SETUP.md](docs/SETUP.md) — gồm K8s manifest, systemd unit, troubleshooting.
+
+---
+
+## 🤝 Use bot cho project của bạn (cho project owner)
+
+Sau khi bot deploy, mỗi project GitLab muốn AI review chỉ cần **3 bước**:
+
+### Bước 1 — Tạo `.pi/config.yaml` trong repo project
+
+```yaml
+# .pi/config.yaml (optional — bot có default hợp lý)
+review:
+  language: vi                              # ngôn ngữ comment
+
+scope:
+  enabled: true                             # bật scope alignment check
+  convention: "feat/T-XX-*"                 # branch pattern → task ID
+  resolvesPattern: "Resolves: #(\\d+)"      # MR description → issue
+  taskIndex: docs/design/07-roadmap.md      # file tra cứu task
+
+block:
+  enabled: true                             # block merge cho đến khi bot approve
+
+llm:
+  model: zai/glm-5.2                        # override (mặc định = bot DEFAULT_MODEL)
+```
+
+### Bước 2 — Copy agent prompt (tùy chọn, để customize review rules)
+
+```bash
+mkdir -p .pi/agents
+# Copy từ template + tùy chỉnh theo project của bạn
+curl -o .pi/agents/code-reviewer.md \
+  https://raw.githubusercontent.com/naicoi92/pi-reviewer-bot/main/agents/code-reviewer.md
+```
+
+Sửa prompt để thêm:
+- Stack & conventions của project (vd Rust strict, no `unwrap()`)
+- Review focus theo layer (vd domain layer không dùng infra deps)
+- Project-specific rules (vd LGPL license, no GPL crate)
+
+### Bước 3 — Add GitLab webhook
+
+```
+Project → Settings → Webhook
+  URL: https://pi-bot.yourdomain.com/webhook
+  Secret token: <WEBHOOK_SECRET>      ← cùng giá trị set trong bot .env
+  Trigger: ✅ Merge request events
+```
+
+**Xong.** Mở MR → bot auto-review trong ~30s-3 phút.
+
+📖 **Chi tiết đầy đủ**: [docs/INTEGRATION.md](docs/INTEGRATION.md) — gồm template cho solo dev, monorepo, docs-only project, troubleshooting.
+
+---
+
 ## Kiến trúc — Mức 3 Full Tool
 
 AI reviewer có **10 tools** và tự decide approve/request_changes qua tool call (không parse verdict regex):
@@ -18,30 +135,6 @@ AI reviewer có **10 tools** và tự decide approve/request_changes qua tool ca
 | **Write verdict** | `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` |
 
 Guardrail: `approve_mr` block nếu chưa `post_summary` hoặc còn critical unresolved.
-
-## Quick Start
-
-```bash
-# 1. Pull image (~115MB, multi-arch amd64+arm64)
-docker pull ghcr.io/naicoi92/pi-reviewer-bot:latest
-
-# 2. Configure
-cp .env.example .env
-# Edit .env: WEBHOOK_SECRET, GITLAB_API_TOKEN, và 1 LLM API key (vd ZAI_API_KEY)
-
-# 3. Run
-docker compose up -d
-
-# 4. Add webhook trong GitLab project:
-#    URL: https://your-host/webhook
-#    Secret: <WEBHOOK_SECRET từ .env>
-#    Trigger: ✅ Merge request events
-```
-
-Xong. Mở MR → bot review trong ~30s-3 phút.
-
-📖 **Full setup**: [docs/SETUP.md](docs/SETUP.md)
-📖 **Integrate vào project khác**: [docs/INTEGRATION.md](docs/INTEGRATION.md)
 
 ## Tính năng
 
