@@ -16,7 +16,7 @@ Bot hỗ trợ **bất kỳ LLM provider nào** Pi hỗ trợ (40+): Z.ai GLM, O
 | **[📖 Integration Guide](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/INTEGRATION.md)** | AI agent / project owner | Setup bot cho project GitLab của bạn (`.pi/config.yaml`, agent prompt, webhook) |
 | **[📖 Skills](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SKILLS.md)** | Developer / AI agent ở project đã setup bot | Luồng công việc hàng ngày với bot: tạo MR, đợi review, đọc comment, xử lý feedback, re-trigger khi cần |
 | **[📖 Config Schema](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md)** | Project owner | `.pi/config.yaml` full schema + examples |
-| **[📖 Architecture](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/ARCHITECTURE.md)** | Maintainer | Design decisions, decision log (D1-D11) |
+| **[📖 Architecture](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/ARCHITECTURE.md)** | Maintainer | Design decisions, decision log (D1-D13) |
 | **[📖 Multi-project Ops](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/MULTIPROJECT.md)** | Ops | Vận hành bot cho nhiều project |
 
 ---
@@ -101,19 +101,21 @@ llm:
   model: zai/glm-5.2                        # override (mặc định = bot DEFAULT_MODEL)
 ```
 
-### Bước 2 — Copy agent prompt (tùy chọn, để customize review rules)
+### Bước 2 — (Optional) Add project review rules
+
+Bot đã có sẵn system prompt gốc (cách dùng 12 tools, workflow, severity, web lookup).
+**Project KHÔNG copy phần này** — bot upgrade tools → tự động kế thừa.
+
+Để customize cho project của bạn, tạo `.pi/REVIEW_RULES.md` — chỉ chứa info về
+project của bạn (stack, conventions, scope rules, license policy):
 
 ```bash
-mkdir -p .pi/agents
-# Copy từ template + tùy chỉnh theo project của bạn
-curl -o .pi/agents/code-reviewer.md \
-  https://raw.githubusercontent.com/naicoi92/pi-reviewer-bot/main/agents/code-reviewer.md
+mkdir -p .pi
+curl -o .pi/REVIEW_RULES.md \
+  https://raw.githubusercontent.com/naicoi92/pi-reviewer-bot/main/agents/REVIEW_RULES.template.md
 ```
 
-Sửa prompt để thêm:
-- Stack & conventions của project (vd Rust strict, no `unwrap()`)
-- Review focus theo layer (vd domain layer không dùng infra deps)
-- Project-specific rules (vd LGPL license, no GPL crate)
+Sửa `.pi/REVIEW_RULES.md` theo project của bạn. Bỏ qua section nào không cần.
 
 ### Bước 3 — Add GitLab webhook
 
@@ -133,11 +135,12 @@ Project → Settings → Webhook
 
 ## Kiến trúc — Mức 3 Full Tool
 
-AI reviewer có **10 tools** và tự decide approve/request_changes qua tool call (không parse verdict regex):
+AI reviewer có **12 tools** và tự decide approve/request_changes qua tool call (không parse verdict regex):
 
 | Nhóm | Tools |
 |---|---|
 | **Read context** | `fetch_file`, `get_issue`, `list_mr_comments`, `list_mr_commits`, `list_wiki_pages`, `get_wiki_page` |
+| **Web lookup** | `web_search`, `fetch_url` — tra cứu version mới nhất, API docs, CVE |
 | **Write verdict** | `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` |
 
 Guardrail: `approve_mr` block nếu chưa `post_summary` hoặc còn critical unresolved.
@@ -145,8 +148,9 @@ Guardrail: `approve_mr` block nếu chưa `post_summary` hoặc còn critical un
 ## Tính năng
 
 - ✅ **Multi-provider** — Z.ai / OpenAI / Anthropic / DeepSeek / Gemini / Ollama / bất kỳ Pi provider nào
-- ✅ **10 tools** — AI có tools để fetch context, post inline comments, approve, request changes
+- ✅ **12 tools** — AI có tools để fetch context, search internet, post inline comments, approve, request changes
 - ✅ **Inline line comments** — DiffNote qua GitLab Discussions API với position hash
+- ✅ **Web lookup** — AI tự verify dependency version mới nhất, API deprecation, CVE qua `web_search` + `fetch_url` (Bun fetch + HTTP/2, Exa hoặc DuckDuckGo fallback, SSRF guard)
 - ✅ **Merge gate** — block MR cho đến khi bot approve (`block.enabled: true` + GitLab Approval Rule)
 - ✅ **CI wait mode** — bot đợi CI pass mới review (`ci.require: true` + GitLab Pipeline events webhook) — tiết kiệm token, tránh review code mà CI sẽ catch lỗi
 - ✅ **Multi-project** — 1 bot instance phục vụ mọi GitLab project qua `.pi/config.yaml`
@@ -164,7 +168,8 @@ pi-reviewer-bot/
 ├── docker-compose.yml          # Production deploy convenience
 ├── package.json                # Bun project deps
 ├── agents/
-│   └── code-reviewer.md        # System prompt cho AI reviewer (10 tools)
+│   ├── code-reviewer.md        # BOT-OWNED system prompt (12 tools) — load runtime, KHÔNG copy sang project
+│   └── REVIEW_RULES.template.md # Template cho .pi/REVIEW_RULES.md (project-owned, optional)
 ├── src/
 │   ├── index.ts                # Hono app: POST /webhook, GET /healthz, /stats
 │   ├── webhook.ts              # Verify token + filter + orchestrate review
@@ -176,8 +181,9 @@ pi-reviewer-bot/
 │   ├── inflight.ts             # In-flight review coordinator (cancel old review on new push)
 │   ├── stats.ts                # Per-project observability
 │   ├── limiter.ts              # Semaphore + rate limit
+│   ├── ssrf.ts                 # SSRF guard cho fetch_url
 │   ├── types.ts                # Webhook payload types
-│   └── tools/                  # 10 custom tools (defineTool)
+│   └── tools/                  # 12 custom tools (defineTool)
 │       ├── index.ts            # Tool factory + shared state
 │       ├── result.ts           # AgentToolResult helpers (ok/err/done)
 │       ├── fetch_file.ts       # Read file (path traversal guard)
@@ -186,12 +192,16 @@ pi-reviewer-bot/
 │       ├── list_mr_commits.ts  # Commit history
 │       ├── list_wiki_pages.ts  # Wiki slug discovery
 │       ├── get_wiki_page.ts    # Read wiki page
+│       ├── web_search.ts       # Search internet (Exa hoặc DuckDuckGo)
+│       ├── fetch_url.ts        # Read URL content (Bun fetch + SSRF guard)
 │       ├── post_summary.ts     # Top-level verdict (required before approve)
 │       ├── post_inline_comment.ts  # DiffNote với severity + line validation
 │       ├── approve_mr.ts       # Approve (guardrail: summary + 0 critical)
 │       └── request_changes.ts  # Unapprove (block merge)
 ├── test/
-│   └── webhook.test.ts         # 22 unit tests
+│   ├── webhook.test.ts         # webhook + coordinator tests
+│   ├── ssrf.test.ts            # SSRF guard tests
+│   └── tools.test.ts           # tool registration tests
 └── docs/
     ├── SETUP.md                # Deploy guide (Docker, K8s, systemd)
     ├── INTEGRATION.md          # Setup bot cho project khác (cho AI consumer)
@@ -236,7 +246,7 @@ bun install
 cp .env.example .env  # điền ZAI_API_KEY hoặc provider khác
 bun run dev            # hot reload tại localhost:3000
 
-bun test               # 22 tests
+bun test               # 97 tests
 bun run typecheck      # strict TypeScript
 ```
 

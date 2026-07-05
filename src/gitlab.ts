@@ -59,7 +59,18 @@ export interface MrContext {
   webUrl: string;
 }
 
-/** Extract API-relevant fields from a webhook payload. */
+/**
+ * Extract API-relevant fields from a webhook payload.
+ *
+ * **Quan trọng (fix BUG 5)**: `sourceSha` fallback `last_commit.id` khi
+ * `source_branch_sha` không được gửi. GitLab không luôn gửi `source_branch_sha`
+ * — vd `open`/`reopen` event trên nhiều bản self-managed chỉ có `last_commit`.
+ *
+ * Phải CONSISTENT với `ciwait.ts:enqueuePendingReview` và `inflight.ts:registerReview`
+ * (cũng fallback `mr.source_branch_sha ?? mr.last_commit?.id`). Trước đây mỗi chỗ
+ * resolve SHA khác nhau → `getMrPipelineStatus` filter theo SHA undefined → lấy
+ * TẤT CẢ pipelines của MR (kể cả zombie cũ) → CI wait mode stuck "running".
+ */
 export function mrContextFromWebhook(payload: MergeRequestWebhook): MrContext {
   const mr = payload.object_attributes;
   return {
@@ -68,7 +79,7 @@ export function mrContextFromWebhook(payload: MergeRequestWebhook): MrContext {
     projectPath: payload.project.path_with_namespace,
     sourceBranch: mr.source_branch,
     targetBranch: mr.target_branch,
-    sourceSha: mr.source_branch_sha,
+    sourceSha: mr.source_branch_sha ?? mr.last_commit?.id,
     targetSha: mr.target_branch_sha,
     title: mr.title,
     description: mr.description ?? "",
@@ -518,8 +529,24 @@ export async function getMrPipelineStatus(
 
     // Chỉ xét pipelines cho commit đang review (source SHA).
     // GitLab list có thể bao gồm pipelines của commit cũ (vd sau rebase).
+    //
+    // **Quan trọng (fix BUG 5)**: nếu SHA undefined (webhook không gửi
+    // source_branch_sha lẫn last_commit — edge case hiếm), filter sẽ miss.
+    // Trước đây code fallback "lấy tất cả pipelines" → có thể include pipeline
+    // cũ zombie running → aggregate return "running" → CI wait stuck.
+    // Giờ: skip hoàn tất pipeline list cũ (only newest) — best-effort, log warn.
     const targetSha = ctx.sourceSha;
-    const relevant = targetSha ? all.filter((p) => p.sha === targetSha) : all;
+    let relevant: MrPipelineEntry[];
+    if (targetSha) {
+      relevant = all.filter((p) => p.sha === targetSha);
+    } else {
+      // Edge case: không có SHA để filter → chỉ lấy pipeline MỚI NHẤT (top of list,
+      // GitLab sort by created_at desc). Tránh aggregate zombie pipeline cũ.
+      console.warn(
+        `[gitlab] getMrPipelineStatus cho !${ctx.mrIid}: sourceSha undefined — fallback newest pipeline only (may miss multi-pipeline aggregate)`,
+      );
+      relevant = all.slice(0, 1);
+    }
 
     return aggregatePipelineStatus(relevant);
   } catch (e) {

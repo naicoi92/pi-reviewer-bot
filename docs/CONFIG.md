@@ -341,11 +341,117 @@ Ví dụ: branch pipeline fail + MR pipeline success → bot coi như **CI fail*
 
 ---
 
-## Agent markdown (`.pi/agents/code-reviewer.md`)
+## Web Lookup Tools
 
-Ngoài config.yaml, project có thể override **toàn bộ review rules** bằng cách tạo agent markdown. Xem template tại [LTStream `.pi/agents/code-reviewer.md`](https://gitlab.com/lttech-ga/live-stream/-/blob/main/.pi/agents/code-reviewer.md) cho ví dụ đầy đủ (DDD/Hexagonal rules, LGPL license check, scope alignment checklist).
+Bot có 2 tools cho AI tra cứu thông tin mới nhất trên internet:
 
-Bot tự nhận agent này nếu file tồn tại. Không cần config thêm.
+| Tool | Mục đích |
+|---|---|
+| `web_search(query, maxResults?)` | Search internet — verify package version mới nhất, API deprecation, CVE |
+| `fetch_url(url)` | Đọc nội dung URL cụ thể — official docs, changelog, GitHub advisory |
+
+### Luôn available — không cần config
+
+Web tools **default ON** trong bot service. Không cần thêm gì vào `.pi/config.yaml`
+để bật. AI tự decide khi nào dùng dựa trên trigger trong system prompt:
+
+- ✅ Trigger: dependency version mismatch, outdated dep, API deprecated/sai signature, CVE
+- ❌ Skip: pure logic review, style nit, diff nhỏ, docs-only
+- Budget: hard cap ~5 web calls/review
+
+Xem `agents/code-reviewer.md` "Web Lookup — Khi nào dùng" cho full trigger checklist.
+
+### Optional env (deployment-wide)
+
+```bash
+# .env của bot service
+EXA_API_KEY=exa-...   # optional — Exa search backend (quality cao cho code docs)
+                      # nếu không set → fallback DuckDuckGo (free, no key)
+```
+
+### Technical
+
+- **HTTP client**: Bun native `fetch()` với HTTP/2 auto-negotiation qua ALPN — không thêm dependency.
+- **SSRF guard**: block private IP literals (127.x, 10.x, 192.168.x, 169.254.x IMDS, ::1, fc00::/7) + non-http protocols (`file://`, `ftp://`, `gopher://` bị chặn).
+- **Timeout**: 12s/search, 15s/fetch.
+- **Size cap**: 100KB/response.
+
+### Known limitations
+
+- ❌ **Không render JavaScript**: SPA docs pages (vd React app) trả HTML trống → bot không đọc được. Workaround: dùng MDN/GitHub raw URL.
+- ❌ **SSRF chỉ check IP literal**: không resolve DNS (DNS-rebind bypass possible). Acceptable risk cho code-review bot — AI không bị lỏa dễ như web app nhận user-input.
+- ❌ **Không cache**: mỗi review re-fetch. Post-MVP: Redis cache theo URL+timestamp.
+
+---
+
+## Project Review Rules (`.pi/REVIEW_RULES.md`)
+
+Project có thể customize review behaviour bằng cách tạo `.pi/REVIEW_RULES.md` trong
+repo — chứa info về **project của bạn**: stack, conventions, scope rules, license
+policy.
+
+### Tại sao tách riêng?
+
+Bot chịu trách nhiệm **toàn bộ** phần "how to use tools / how to review" (12 tools,
+workflow, severity, web lookup, ...). Phần này **bot-owned** — project KHÔNG copy.
+Khi bot upgrade tools (vd 12 → 15 tools), project **auto kế thừa**, không cần update.
+
+Project chỉ viết về **project của mình** — append vào base prompt của bot.
+
+### Cách dùng
+
+```bash
+mkdir -p .pi
+# Copy template từ bot repo (optional — viết tay cũng OK)
+curl -o .pi/REVIEW_RULES.md \
+  https://raw.githubusercontent.com/naicoi92/pi-reviewer-bot/main/agents/REVIEW_RULES.template.md
+```
+
+Sau đó sửa `.pi/REVIEW_RULES.md` theo project của bạn. Xem template cho gợi ý các
+section (Stack, Conventions, Review focus, Policies, Out of scope). Section nào
+không cần → bỏ.
+
+### Ví dụ
+
+```markdown
+# Review Rules — LTStream
+
+## Stack
+- Rust 1.75+ strict mode (no `unwrap()`/`expect()` ngoài test)
+- TypeScript strict no-`any` cho frontend
+
+## Policies
+- Không dùng GPL/LGPL crate — check license mỗi dependency mới
+- Domain layer (src/domain/) không import infra deps
+
+## Out of scope
+- Không review `docs/design/**` (design docs)
+- Skip `vendor/**` (third-party)
+```
+
+### Behavior
+
+| Project có `.pi/REVIEW_RULES.md`? | Behavior |
+|---|---|
+| ✅ Có | Bot load + append vào base prompt → AI thấy rules khi review |
+| ❌ Không | Bot review với default base prompt (vẫn đầy đủ tools, workflow) |
+
+### Backwards compatibility
+
+Project đang dùng `.pi/agents/code-reviewer.md` (tên legacy) → bot vẫn đọc và warn
+deprecated trong log. **Khuyến nghị migrate** sang `.pi/REVIEW_RULES.md`:
+
+```bash
+git mv .pi/agents/code-reviewer.md .pi/REVIEW_RULES.md
+```
+
+> ⚠️ Path `.pi/agents/code-reviewer.md` sẽ bị bỏ hỗ trợ từ v0.5.
+
+### Limits
+
+- File size: **50KB**. Vượt → bot truncate + log warning.
+- Format: markdown tự do. Không ép structure (template chỉ là gợi ý).
+- File ở source branch (bot clone source branch) — commit trên branch đang review.
 
 ---
 

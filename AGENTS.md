@@ -25,7 +25,8 @@ pi-reviewer-bot/
 ├── package.json                    # deps: @earendil-works/pi-coding-agent, hono, @gitbeaker/rest, yaml
 ├── tsconfig.json                   # strict mode
 ├── agents/
-│   └── code-reviewer.md            # system prompt cho AI reviewer (10 tools)
+│   ├── code-reviewer.md            # BOT-OWNED system prompt (load runtime, KHÔNG copy sang project)
+│   └── REVIEW_RULES.template.md    # template optional cho .pi/REVIEW_RULES.md (project-owned)
 ├── src/
 │   ├── index.ts                    # Hono app entrypoint (POST /webhook, GET /healthz, /stats)
 │   ├── webhook.ts                  # verify token + filter + orchestrate review + CI wait check
@@ -37,8 +38,9 @@ pi-reviewer-bot/
 │   ├── inflight.ts                 # in-flight review coordinator (cancel review cũ khi push mới — fix BUG 3)
 │   ├── stats.ts                    # per-project observability
 │   ├── limiter.ts                  # semaphore + rate limit
+│   ├── ssrf.ts                     # SSRF guard cho fetch_url (block private IP + non-http protocols)
 │   ├── types.ts                    # webhook payload + types (MR + Pipeline)
-│   └── tools/                      # 10 custom tools (defineTool)
+│   └── tools/                      # 12 custom tools (defineTool)
 │       ├── index.ts                # tool factory + shared state
 │       ├── result.ts               # ok/err/done helpers (AgentToolResult shape)
 │       ├── fetch_file.ts           # read file (path traversal guard)
@@ -47,17 +49,21 @@ pi-reviewer-bot/
 │       ├── list_mr_commits.ts      # commit history
 │       ├── list_wiki_pages.ts      # wiki slug discovery
 │       ├── get_wiki_page.ts        # read wiki page (ADRs ngoài repo)
+│       ├── web_search.ts           # search internet (Exa hoặc DuckDuckGo) — dep/API/CVE verify
+│       ├── fetch_url.ts            # read URL content (Bun fetch + SSRF guard)
 │       ├── post_summary.ts         # top-level verdict (BẮT BUỘC trước approve)
 │       ├── post_inline_comment.ts  # DiffNote với severity + line validation
 │       ├── approve_mr.ts           # approve (guardrail: summary + 0 critical)
 │       └── request_changes.ts      # unapprove (block merge)
 └── test/
-    └── webhook.test.ts             # 22 unit tests
+    ├── webhook.test.ts             # webhook + coordinator tests
+    ├── ssrf.test.ts                # SSRF guard tests
+    └── tools.test.ts               # tool registration tests
 ```
 
-## 10 Tools (Mức 3 Full Tool)
+## 12 Tools (Mức 3 Full Tool)
 
-AI reviewer có 10 tools (chia 2 nhóm):
+AI reviewer có 12 tools (chia 2 nhóm):
 
 ### Read (không mutate state)
 1. `fetch_file(path)` — đọc file verify context
@@ -66,14 +72,31 @@ AI reviewer có 10 tools (chia 2 nhóm):
 4. `list_mr_commits()` — commit history
 5. `list_wiki_pages()` — wiki slug discovery
 6. `get_wiki_page(slug)` — read wiki page
+7. `web_search(query, maxResults?)` — search internet (dep version, API, CVE)
+8. `fetch_url(url)` — read URL content (sau web_search hoặc URL đã biết)
 
 ### Write (mutate state + call GitLab API)
-7. `post_inline_comment(path, line, comment, severity)` — DiffNote line-specific
-8. `post_summary(markdown)` — top-level verdict (BẮT BUỘC trước approve)
-9. `approve_mr(rationale)` — approve (guardrail: summary + 0 critical)
-10. `request_changes(reason)` — unapprove (block merge)
+9. `post_inline_comment(path, line, comment, severity)` — DiffNote line-specific
+10. `post_summary(markdown)` — top-level verdict (BẮT BUỘC trước approve)
+11. `approve_mr(rationale)` — approve (guardrail: summary + 0 critical)
+12. `request_changes(reason)` — unapprove (block merge)
 
 **Guardrail approve_mr**: block nếu chưa post_summary HOẶC criticalCount > 0.
+
+### Web Lookup — trigger-driven
+
+`web_search` + `fetch_url` cho phép AI verify dependency version mới nhất, API
+deprecation, CVE. **Default ON** (luôn available, không cần per-project opt-in).
+AI tự decide khi nào dùng dựa trên trigger trong system prompt (xem
+`agents/code-reviewer.md` "Web Lookup — Khi nào dùng"):
+
+- ✅ Trigger: version mismatch, outdated dep, API deprecated/sai signature, CVE concern
+- ❌ Skip: pure logic, style, obvious bugs, diff nhỏ
+- Budget: hard cap 5 web calls/review
+- Bun native `fetch()` (HTTP/2 auto), SSRF guard block private IP literals
+
+Optional `EXA_API_KEY` env để dùng Exa search (quality cao cho code docs); nếu
+không set → fallback DuckDuckGo (free, no key).
 
 ## LLM Providers (Multi-provider)
 
@@ -187,6 +210,10 @@ Xem [`docs/CONFIG.md`](docs/CONFIG.md) cho schema đầy đủ.
 | D10 | CI wait qua pipeline webhook + stateful Map in-memory | Event-driven (không polling), không giữ slot semaphore khi chờ, per-project timeout override |
 | D11 | Cancel review cũ qua AbortController khi push mới | Tránh 2 review song song (race condition, duplicate comment, sai SHA diff) |
 | D12 | Unapprove đồng bộ khi push mới + block=true | Đóng merge window — approval cũ (cho SHA trước) bị revoke ngay, MR blocked trong suốt re-review |
+| D13 | Web lookup (web_search + fetch_url) — default ON, prompt-driven triggers | Verify dep version mới nhất, API deprecation, CVE. AI tự decide dựa trên trigger trong system prompt (không per-project opt-in). Bun native fetch (HTTP/2), SSRF guard cơ bản. Exa nếu có key, fallback DuckDuckGo. |
+| D14 | `mrContextFromWebhook` fallback SHA consistent với `ciwait.ts` + `inflight.ts` (fix BUG 5) | Trước đây 3 chỗ resolve SHA khác nhau → `getMrPipelineStatus` filter theo SHA undefined → lấy tất cả pipelines (kể cả zombie cũ running) → CI wait mode stuck. Fix:统 nhất `source_branch_sha ?? last_commit.id` + log warn khi vẫn undefined (fallback newest pipeline). |
+| D15 | Pipeline webhook handler log mọi skip path (fix BUG 6) | 3 skip path silent khiến debug "pipeline webhook có đến bot không" vô hiệu. Log `[webhook] pipeline skip <project>@<short-sha> — <reason>` consistent với MR webhook skip log. |
+| D16 | Tách system prompt: bot-controlled base + project append qua `.pi/REVIEW_RULES.md` | Bot owned phần "how to use tools / workflow" — project không copy. Project chỉ viết info về project của họ. Bot upgrade tools → project auto kế thừa. Dùng `appendSystemPrompt` của Pi SDK DefaultResourceLoader. Backwards compat: `.pi/agents/code-reviewer.md` legacy vẫn đọc + warn. |
 
 Xem [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) cho decision chi tiết.
 
@@ -199,6 +226,9 @@ Xem [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) cho decision chi tiết.
 - ❌ Auto-fix commits
 - ❌ Pending CI wait mất khi bot restart (in-memory, không persist — user push commit retry)
 - ❌ Parent-child pipelines (downstream, `trigger:` keyword) không tracked — bot chỉ check parent pipeline status. Workaround: dùng `needs:` trong CI config để parent đợi child xong
+- ❌ Web tools SSRF chỉ check IP literal — không resolve DNS (DNS-rebind bypass possible). Acceptable risk cho code-review bot.
+- ❌ Web tools không render JS (no headless browser) — SPA docs pages trả HTML trống không đọc được. Workaround: dùng sitemap hoặc trực tiếp MDN/GitHub raw.
+- ❌ Web search không cache — mỗi review re-fetch. Post-MVP: Redis/disk cache.
 
 ## Useful Commands
 
