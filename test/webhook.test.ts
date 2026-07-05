@@ -105,13 +105,6 @@ describe("shouldReview", () => {
     expect(shouldReview(w, DEFAULT_CONFIG).review).toBe(false);
   });
 
-  test("skips approved action", () => {
-    const w = makeWebhook({
-      object_attributes: { ...makeWebhook().object_attributes, action: "approved" },
-    });
-    expect(shouldReview(w, DEFAULT_CONFIG).review).toBe(false);
-  });
-
   test("skips draft MR", () => {
     const w = makeWebhook({
       object_attributes: { ...makeWebhook().object_attributes, draft: true },
@@ -157,25 +150,52 @@ describe("shouldReview", () => {
     expect(shouldReview(w, DEFAULT_CONFIG).review).toBe(false);
   });
 
-  test("skips update without new commit", () => {
+  test("skips update when MR has no commits (title/description edit only)", () => {
+    // Bug 2 regression: update event với MR chưa có commit nào (vd mới edit description)
     const w = makeWebhook({
-      object_attributes: { ...makeWebhook().object_attributes, action: "update" },
-      changes: { last_commit: { previous: null, current: null } },
+      object_attributes: {
+        ...makeWebhook().object_attributes,
+        action: "update",
+        last_commit: undefined,  // MR chưa có commit
+      },
+    });
+    expect(shouldReview(w, DEFAULT_CONFIG).review).toBe(false);
+    expect(shouldReview(w, DEFAULT_CONFIG).reason).toBe("update-without-commit");
+  });
+
+  test("accepts update when MR has commits (regardless of changes.last_commit)", () => {
+    // Bug 2 regression: GitLab không gửi changes.last_commit.current nhưng MR có commit
+    // → phải vẫn review được
+    const w = makeWebhook({
+      object_attributes: {
+        ...makeWebhook().object_attributes,
+        action: "update",
+        last_commit: { id: "abc123", message: "feat: x", timestamp: "", url: "", author: { name: "", email: "" } },
+      },
+      changes: {},  // GitLab gửi rỗng (bug condition)
+    });
+    expect(shouldReview(w, DEFAULT_CONFIG)).toEqual({ review: true });
+  });
+
+  test("Bug 1 regression: accepts reopen action", () => {
+    const w = makeWebhook({
+      object_attributes: { ...makeWebhook().object_attributes, action: "reopen" },
+    });
+    expect(shouldReview(w, DEFAULT_CONFIG)).toEqual({ review: true });
+  });
+
+  test("skips approved action (not code review trigger)", () => {
+    const w = makeWebhook({
+      object_attributes: { ...makeWebhook().object_attributes, action: "approved" },
     });
     expect(shouldReview(w, DEFAULT_CONFIG).review).toBe(false);
   });
 
-  test("accepts update WITH new commit", () => {
+  test("skips mark_as_draft action", () => {
     const w = makeWebhook({
-      object_attributes: { ...makeWebhook().object_attributes, action: "update" },
-      changes: {
-        last_commit: {
-          previous: { id: "old", message: "old", timestamp: "", url: "", author: { name: "", email: "" } },
-          current: { id: "new", message: "new", timestamp: "", url: "", author: { name: "", email: "" } },
-        },
-      },
+      object_attributes: { ...makeWebhook().object_attributes, action: "mark_as_draft" },
     });
-    expect(shouldReview(w, DEFAULT_CONFIG)).toEqual({ review: true });
+    expect(shouldReview(w, DEFAULT_CONFIG).review).toBe(false);
   });
 });
 

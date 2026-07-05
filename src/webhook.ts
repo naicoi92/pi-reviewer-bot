@@ -63,14 +63,25 @@ export function shouldReview(
   if (mr.draft || mr.work_in_progress) {
     return { review: false, reason: "draft" };
   }
-  if (mr.action !== "open" && mr.action !== "update") {
+
+  // Bug fix: thêm "reopen" vào whitelist (trước đây chỉ có open/update).
+  // Reopen = MR đóng rồi mở lại → cần review lại như open.
+  // "approved"/"unapproved"/"mark_as_draft"/... vẫn skip (không liên quan review code).
+  const REVIEWABLE_ACTIONS = new Set(["open", "update", "reopen"]);
+  if (!REVIEWABLE_ACTIONS.has(mr.action)) {
     return { review: false, reason: `action=${mr.action}` };
   }
-  if (mr.action === "update") {
-    const lastCommitChange = payload.changes?.last_commit;
-    if (!lastCommitChange || !lastCommitChange.current) {
-      return { review: false, reason: "update-without-new-commit" };
-    }
+
+  // Bug fix: check last_commit qua object_attributes.last_commit (luôn present)
+  // thay vì changes.last_commit.current (GitLab thường không gửi field này
+  // trong update event → mọi push commit mới bị skip sai).
+  //
+  // Logic:
+  // - open/reopen → luôn review (MR mới activate)
+  // - update → chỉ review nếu MR thực sự có commit (object_attributes.last_commit tồn tại)
+  //   Tránh review thừa khi chỉ edit title/description/labels.
+  if (mr.action === "update" && !mr.last_commit) {
+    return { review: false, reason: "update-without-commit" };
   }
   try {
     const titleRe = new RegExp(cfg.review.skipTitleRegex, "i");
