@@ -67,8 +67,10 @@ export interface PipelineObjectAttributes {
   sha: string;
   /** "branch" | "tag" — usually branch cho MR pipeline. */
   source?: string;
-  /** Project ID pipeline belongs to. */
-  project_id: number;
+  // NOTE: `project_id` KHÔNG nằm trong `object_attributes` của pipeline webhook
+  // (fix BUG 7). GitLab đặt project ID ở top-level `project.id` (xem docs:
+  // https://docs.gitlab.com/development/webhooks/). Dùng `resolvePipelineProjectId`
+  // trong gitlab.ts để resolve — KHÔNG đọc trực tiếp từ đây.
 }
 
 export interface PipelineWebhook {
