@@ -9,6 +9,10 @@ versioning theo [Semantic Versioning](https://semver.org/).
 ### Added
 - Initial public release preparation
 
+### Fixed
+- **BUG 5: CI wait mode stuck "running" vì SHA asymmetry** — `mrContextFromWebhook` không fallback `last_commit.id` khi `source_branch_sha` undefined (xảy ra ở open/reopen event, nhiều GitLab self-managed). `getMrPipelineStatus` filter theo SHA undefined → lấy tất cả pipelines của MR kể cả zombie cũ running → aggregate "running" → bot enqueue đợi → stuck. Fix: thống nhất fallback `source_branch_sha ?? last_commit.id` ở 3 chỗ (ciwait, inflight, mrContextFromWebhook) + log warn khi vẫn undefined.
+- **BUG 6: Pipeline webhook handler thiếu logging** — 3 skip path silent (`status !== "success"`, missing project_id/sha, no pending entry) không có log → không debug được "CI pass nhưng bot không review". Fix: thêm `[webhook] pipeline skip <project>@<short-sha> — <reason>` consistent với MR webhook log.
+
 ## [0.2.0] — 2026-07-05
 
 ### Added

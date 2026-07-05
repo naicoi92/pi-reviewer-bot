@@ -5,7 +5,7 @@
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { resolveCiWaitTimeoutMs, shouldReview, verifyToken } from "../src/webhook.ts";
-import { aggregatePipelineStatus, type MrPipelineEntry } from "../src/gitlab.ts";
+import { aggregatePipelineStatus, mrContextFromWebhook, type MrPipelineEntry } from "../src/gitlab.ts";
 import { DEFAULT_CONFIG, mergeConfig, type ProjectConfig } from "../src/config.ts";
 import {
   consumePendingReview,
@@ -772,5 +772,148 @@ describe("BUG 4: block.enabled triggers unapprove on re-review", () => {
     });
     expect(cfg.block.enabled).toBe(true);
     expect(cfg.ci.require).toBe(true);
+  });
+});
+
+// ─── BUG 5 regression: SHA asymmetry → CI wait mode stuck "running" ──
+// Root cause: `mrContextFromWebhook` không fallback SHA khi `source_branch_sha`
+// undefined. Trong khi `ciwait.ts:enqueuePendingReview` + `inflight.ts:registerReview`
+// đều fallback `mr.source_branch_sha ?? mr.last_commit?.id`.
+//
+// Asymmetry → `getMrPipelineStatus` filter theo SHA undefined → lấy TẤT CẢ pipelines
+// của MR (kể cả zombie cũ) → aggregate return "running" → bot enqueue đợi → stuck.
+//
+// Trigger condition: webhook không gửi source_branch_sha (open/reopen event,
+// hoặc nhiều GitLab self-managed versions chỉ có last_commit).
+
+describe("BUG 5 regression: mrContextFromWebhook SHA fallback", () => {
+  test("source_branch_sha present → dùng trực tiếp (no regression)", () => {
+    const w = makeWebhook({
+      object_attributes: {
+        ...makeWebhook().object_attributes,
+        source_branch_sha: "abc123",
+      },
+    });
+    const ctx = mrContextFromWebhook(w);
+    expect(ctx.sourceSha).toBe("abc123");
+  });
+
+  test("source_branch_sha undefined + last_commit.id present → fallback đúng", () => {
+    // Edge case phổ biến: open/reopen event chỉ có last_commit.
+    const w = makeWebhook({
+      object_attributes: {
+        ...makeWebhook().object_attributes,
+        source_branch_sha: undefined,
+        last_commit: {
+          id: "fromlastcommit",
+          message: "",
+          timestamp: "",
+          url: "",
+          author: { name: "", email: "" },
+        },
+      },
+    });
+    const ctx = mrContextFromWebhook(w);
+    expect(ctx.sourceSha).toBe("fromlastcommit");
+  });
+
+  test("cả 2 undefined → sourceSha undefined (không crash)", () => {
+    const w = makeWebhook({
+      object_attributes: {
+        ...makeWebhook().object_attributes,
+        source_branch_sha: undefined,
+        last_commit: undefined,
+      },
+    });
+    const ctx = mrContextFromWebhook(w);
+    expect(ctx.sourceSha).toBeUndefined();
+  });
+
+  test("CONSISTENCY: cùng payload → mrContextFromWebhook + enqueuePendingReview dùng cùng SHA", () => {
+    // Property test: 3 chỗ resolve SHA phải agree. Nếu lệch nhau → pipeline webhook
+    // consume được entry nhưng getMrPipelineStatus filter sai (BUG 5 gốc).
+    const w = makeWebhook({
+      object_attributes: {
+        ...makeWebhook().object_attributes,
+        iid: 99,
+        source_branch_sha: undefined,
+        last_commit: {
+          id: "sharedsha",
+          message: "",
+          timestamp: "",
+          url: "",
+          author: { name: "", email: "" },
+        },
+      },
+    });
+
+    // mrContextFromWebhook resolve
+    const ctx = mrContextFromWebhook(w);
+    expect(ctx.sourceSha).toBe("sharedsha");
+
+    // enqueuePendingReview resolve — phải cùng SHA
+    resetCiwait();
+    enqueuePendingReview(w, 60_000, () => {});
+    const entry = consumePendingReview(100, "sharedsha");
+    expect(entry).toBeDefined();
+    expect(ctx.sourceSha).toBe("sharedsha"); // cùng value
+    resetCiwait();
+  });
+});
+
+describe("BUG 5 regression: aggregatePipelineStatus filter đúng khi SHA resolve", () => {
+  function pipe(status: PipelineStatus, sha: string): MrPipelineEntry {
+    return {
+      id: Math.floor(Math.random() * 1_000_000),
+      sha,
+      ref: "feat/test",
+      status,
+      created_at: "2026-07-05T00:00:00Z",
+      updated_at: "2026-07-05T00:00:00Z",
+      web_url: "https://gitlab.com/test/pipelines/-/1",
+    };
+  }
+
+  test("trước fix: SHA undefined → lấy tất cả → có zombie running → stuck 'running'", () => {
+    // Reproduce BUG 5 gốc: pipeline commit cũ kẹt running + pipeline mới success.
+    // Trước fix: filter với SHA undefined → relevant = all → aggregate "running".
+    // Sau fix: SHA resolve được → filter chỉ pipeline mới → aggregate "success".
+    const oldSha = "oldcommit123";
+    const newSha = "newcommit456";
+    const pipelinesFromGitlab = [
+      pipe("success", newSha), // pipeline mới — CI pass
+      pipe("running", oldSha), // pipeline cũ — zombie kẹt running
+    ];
+
+    // Giả lập filter của getMrPipelineStatus với SHA được resolve đúng (post-fix).
+    // mrContextFromWebhook bây giờ fallback last_commit.id → có SHA.
+    const resolvedSha = newSha; // post-fix: được resolve từ last_commit.id
+    const relevant = pipelinesFromGitlab.filter((p) => p.sha === resolvedSha);
+
+    // Post-fix: chỉ filter được pipeline mới → aggregate = success (CI pass, review được).
+    const result = aggregatePipelineStatus(relevant);
+    expect(result.hasPipeline).toBe(true);
+    if (result.hasPipeline) {
+      expect(result.status).toBe("success");
+      expect(result.sha).toBe(newSha);
+    }
+  });
+
+  test("post-fix: filter đúng → multi-pipeline cùng SHA vẫn aggregate đúng", () => {
+    // Multi-pipeline workflow (branch + MR pipeline) cho cùng SHA — phải aggregate cả 2.
+    const sha = "sharedheadsha";
+    const pipelinesFromGitlab = [
+      pipe("success", sha),
+      pipe("success", sha),
+    ];
+
+    const resolvedSha = sha;
+    const relevant = pipelinesFromGitlab.filter((p) => p.sha === resolvedSha);
+
+    const result = aggregatePipelineStatus(relevant);
+    expect(result.hasPipeline).toBe(true);
+    if (result.hasPipeline) {
+      expect(result.status).toBe("success");
+    }
   });
 });

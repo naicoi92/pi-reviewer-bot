@@ -97,22 +97,31 @@ app.post("/webhook", async (c) => {
     const status = attrs?.status;
     const projectId = attrs?.project_id;
     const sha = attrs?.sha;
+    const shortSha = sha ? sha.slice(0, 8) : "?";
 
+    // **Fix BUG 6**: log mọi skip path + happy path để debug "pipeline webhook
+    // có đến bot không" qua docker logs. Trước đây 3 skip path silent → khó debug
+    // "CI pass nhưng bot không review".
     if (status !== "success") {
+      console.log(`[webhook] pipeline skip ${projectId}@${shortSha} — status=${status}`);
       return c.json({ skipped: true, reason: `pipeline-status=${status}` });
     }
     if (!projectId || !sha) {
+      console.log(`[webhook] pipeline skip — missing project_id or sha (projectId=${projectId}, sha=${sha ?? "undefined"})`);
       return c.json({ skipped: true, reason: "pipeline-missing-project-id-or-sha" });
     }
 
     // Lookup pending review (đăng ký khi MR webhook đến + CI đang chạy).
     const entry = consumePendingReview(projectId, sha);
     if (!entry) {
-      // Không có pending — skip idempotent (MR đã review rồi, hoặc ci.require=false).
+      // Không có pending — skip idempotent (MR đã review rồi, hoặc ci.require=false,
+      // hoặc SHA mismatch — thường xảy ra khi bot restart mất pending state,
+      // hoặc khi pipeline webhook đến trước MR webhook do race).
+      console.log(`[webhook] pipeline skip ${projectId}@${shortSha} — no pending review (already reviewed / bot restarted / SHA mismatch)`);
       return c.json({ skipped: true, reason: "no-pending-review" });
     }
 
-    console.log(`[webhook] pipeline success ${projectId}@${sha.slice(0, 8)} — triggering deferred review for !${entry.payload.object_attributes.iid}`);
+    console.log(`[webhook] pipeline success ${projectId}@${shortSha} — triggering deferred review for !${entry.payload.object_attributes.iid}`);
     // Trigger review với skipCiCheck=true (CI đã pass, không check lại).
     performReview(entry.payload, { skipCiCheck: true }).catch((err) => {
       console.error(`[webhook] uncaught deferred review error:`, err);

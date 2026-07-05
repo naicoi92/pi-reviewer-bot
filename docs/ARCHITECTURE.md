@@ -301,6 +301,39 @@ Cancel review cũ khi review mới bắt đầu (fix BUG 3):
 - 1 GitLab API call thêm mỗi review (cost nhỏ ~50ms)
 - Project có GitLab "Reset approval on push"=ON → unapprove no-op (idempotent) → không phá gì
 
+### D14: SHA resolution consistent qua 3 modules (fix BUG 5)
+
+**Chọn**: `mrContextFromWebhook` fallback `mr.source_branch_sha ?? mr.last_commit?.id` — consistent với `ciwait.ts:enqueuePendingReview` và `inflight.ts:registerReview`.
+
+**Lý do**:
+- BUG 5 gốc: `mrContextFromWebhook` không fallback → `MrContext.sourceSha` undefined khi webhook không gửi `source_branch_sha` (xảy ra ở open/reopen event + nhiều GitLab self-managed versions)
+- `getMrPipelineStatus` filter theo SHA undefined → lấy TẤT CẢ pipelines của MR kể cả zombie cũ → aggregate "running" → bot enqueue đợi → stuck 10 phút timeout
+- 3 chỗ resolve SHA (ciwait, inflight, mrContextFromWebhook) phải agree — cùng payload phải ra cùng SHA, không thì pipeline webhook consume được entry nhưng pipeline status check filter sai
+
+**Alternatives đã loại**:
+- ❌ **Refactor `MrContext.sourceSha` thành required field** — break nhiều call sites, overkill cho edge case
+- ❌ **Skip pipeline list khi SHA undefined** — khắt khe quá, fail close → bot không review được khi có thể vẫn hoạt động bình thường
+- ❌ **Lấy tất cả pipelines khi SHA undefined (pre-fix behavior)** — bug gốc, có thể include zombie running
+
+**Trade-off**:
+- Khi cả 2 field undefined (hiếm): fallback "chỉ lấy pipeline mới nhất" (top of GitLab list, sort by created_at desc) + log warn. Best-effort — có thể miss multi-pipeline aggregate nhưng tránh zombie pipeline.
+
+### D15: Pipeline webhook handler log mọi skip path (fix BUG 6)
+
+**Chọn**: 3 skip path + 1 happy path đều `console.log` với format `[webhook] pipeline <skip|success> <project>@<short-sha> — <reason>`.
+
+**Lý do**:
+- BUG 6: trước đây 3 skip path silent → user không debug được "CI đã pass nhưng bot không review" qua `docker logs`
+- Consistent với MR webhook skip log (`[webhook] skip !XX — reason`)
+- Log成本低 (~1 dòng/log), debug giá trị cao — pipeline webhook là điểm fail silent phổ biến
+
+**Alternatives đã loại**:
+- ❌ **Structured logging (pino/winston)** — overkill cho MVP, không có log aggregation setup
+- ❌ **Tăng log level lên debug + flag** — phức tạp, không cần thiết với volume thấp
+
+**Trade-off**:
+- Log nhiều hơn (3 dòng/webhook) — không đáng kể với volume thấp (<50 MR/ngày)
+
 ## Risk register
 
 | Risk | Likelihood | Impact | Mitigation |
