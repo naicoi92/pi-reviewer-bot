@@ -24,8 +24,9 @@ block:
   enabled: false    # bật true nếu muốn block merge
 EOF
 
-# 2. Copy agent prompt (tùy chỉnh)
-cp /path/to/pi-reviewer-bot/agents/code-reviewer.md .pi/agents/
+# 2. (Optional) Add project review rules
+curl -o .pi/REVIEW_RULES.md \
+  https://raw.githubusercontent.com/naicoi92/pi-reviewer-bot/main/agents/REVIEW_RULES.template.md
 
 # 3. Add webhook trong GitLab
 # Settings → Webhook → URL: https://pi-bot.example.com/webhook → Secret: ...
@@ -91,56 +92,53 @@ và đọc file từ đó → cần có sẵn trước khi review.
 
 ---
 
-## Bước 2 — Copy + tùy chỉnh agent prompt
+## Bước 2 — (Optional) Add project review rules
 
-Bot dùng system prompt từ `.pi/agents/code-reviewer.md` (nếu tồn tại).
-Copy template từ pi-reviewer-bot repo, hoặc tạo mới:
+Bot tự có sẵn **system prompt gốc** (cách dùng 12 tools, workflow, severity rules,
+web lookup guidance, ...). Project KHÔNG cần copy phần này — bot upgrade tools →
+project auto kế thừa.
+
+Để customize review cho project của bạn, tạo `.pi/REVIEW_RULES.md` — chỉ chứa
+info về **project của bạn** (stack, conventions, scope rules, license policy).
 
 ```bash
-mkdir -p .pi/agents
+mkdir -p .pi
+# Copy template (optional — viết tay cũng OK)
+curl -o .pi/REVIEW_RULES.md \
+  https://raw.githubusercontent.com/naicoi92/pi-reviewer-bot/main/agents/REVIEW_RULES.template.md
 ```
 
 ```markdown
-<!-- .pi/agents/code-reviewer.md -->
----
-description: AI code reviewer cho project này
----
+<!-- .pi/REVIEW_RULES.md -->
 
-# Code Reviewer Agent — <tên project>
+# Review Rules — <tên project>
 
-Bạn là AI code reviewer cho **<tên project>** (<mô tả ngắn 1 dòng>).
-
-## Stack & conventions
-
-- **Language**: <vd Rust, TypeScript, Python...>
-- **Framework**: <vd Tauri, SolidJS, Django...>
-- **Architecture**: <vd DDD, MVC, microservices...>
-- **Code style**: <vd strict TS, no any, format with prettier>
+## Stack
+- Rust 1.75+ strict mode (no unwrap() ngoài test)
+- TypeScript strict no-`any` cho frontend
 
 ## Review focus (theo layer)
+- src-tauri/**/*.rs: async correctness, ownership, Result/Option
+- src/**/*.{ts,tsx}: reactivity patterns, accessibility
 
-### <vd src-tauri/**/*.rs — Rust backend>
-- Async correctness, ownership, Result/Option handling
-- No unwrap() ở production path
+## Policies
+- Không dùng GPL/LGPL crate
+- Domain layer (src/domain/) không import infra deps
 
-### <vd src/**/*.{ts,tsx} — SolidJS frontend>
-- Reactivity patterns, accessibility, i18n
-
-## Project-specific rules
-
-- <vd License LGPL — no GPL crate>
-- <vd No new dependencies without ADR>
-- <vd Tests required for new features>
-
-## Task convention (nếu scope.enabled = true)
-
-- Branch: `feat/T-XX-*` → task T-XX
-- MR description: `Resolves: #N` → issue #N
-- Task index: `<path-to-roadmap-file>`
+## Out of scope
+- Không review docs/design/** (design docs)
+- Skip vendor/** (third-party)
 ```
 
-**Quan trọng**: agent prompt quyết định **chất lượng review**. Viết càng cụ thể cho
-project, bot càng chính xác. Không có file này → bot dùng default (generic, ít hữu ích).
+Section nào không cần → bỏ. Template đầy đủ xem [`agents/REVIEW_RULES.template.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/agents/REVIEW_RULES.template.md).
+
+**Quan trọng**: `.pi/REVIEW_RULES.md` quyết định **chất lượng review cho project của bạn**.
+Viết càng cụ thể, bot càng chính xác. Không có file này → bot vẫn review được với
+default (generic, không biết conventions đặc thù).
+
+> 💡 **Bot-controlled vs project-controlled**: phần hướng dẫn tools/workflow do bot
+> lo. Project chỉ viết về project của mình. Khi bot thêm tool mới (vd web_search),
+> project tự động có tool đó — không cần update prompt.
 
 ---
 
@@ -304,7 +302,7 @@ Xem [`docs/CONFIG.md#ci-integration`](https://github.com/naicoi92/pi-reviewer-bo
    ↓
 3. Bot clone source branch (depth 1)
    ↓
-4. Bot đọc .pi/config.yaml + .pi/agents/code-reviewer.md + AGENTS.md
+4. Bot đọc .pi/config.yaml + .pi/REVIEW_RULES.md + AGENTS.md
    ↓
 5. (Nếu ci.require=true) Bot check pipeline status:
    ├── CI running → đợi pipeline webhook → trigger review khi CI pass
@@ -367,7 +365,7 @@ scope:
   enabled: false
 ```
 
-Mỗi package có thể có `.pi/agents/code-reviewer.md` riêng (nếu muốn).
+Mỗi package có thể có `.pi/REVIEW_RULES.md` riêng (nếu muốn).
 
 ### Project docs-only
 
@@ -475,7 +473,7 @@ Bot comment phải có scope alignment output:
 
 | Triệu chứng | Fix |
 |---|---|
-| Bot review generic, không biết conventions | Viết `.pi/agents/code-reviewer.md` cụ thể hơn |
+| Bot review generic, không biết conventions | Viết `.pi/REVIEW_RULES.md` cụ thể hơn |
 | Bot không biết task convention | Bật `scope.enabled` trong `.pi/config.yaml` |
 | Bot comment tiếng Anh dù muốn VN | Set `review.language: vi` |
 | Bot không đọc được ADRs | Đảm bảo file trong repo HOẶC dùng `get_wiki_page` tool |
@@ -483,7 +481,7 @@ Bot comment phải có scope alignment output:
 ### Bot approve nhầm / request_changes nhầm
 
 - Bot có guardrail: phải `post_summary` trước + 0 critical mới approve
-- Nếu verdict sai → review agent prompt trong `.pi/agents/code-reviewer.md`
+- Nếu verdict sai → review `.pi/REVIEW_RULES.md` (project rules) — bot base prompt không sửa được
 - User luôn có thể manually override approve trong GitLab UI
 
 ---
@@ -493,7 +491,7 @@ Bot comment phải có scope alignment output:
 Xem thêm:
 - [`docs/SKILLS.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SKILLS.md) — **workflow skills cho AI agents** (setup webhook, skip reasons, re-trigger, debug)
 - [`docs/CONFIG.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md) — full schema `.pi/config.yaml`
-- [`agents/code-reviewer.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/agents/code-reviewer.md) — agent prompt template
+- [`agents/REVIEW_RULES.template.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/agents/REVIEW_RULES.template.md) — project rules template
 
 ---
 

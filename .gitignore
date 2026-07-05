@@ -4,6 +4,10 @@ node_modules/
 # Build artifacts
 dist/
 *.tsbuildinfo
+.bun-build*
+test-compile
+test-embed*
+test-meta*
 
 # Secrets — KHÔNG BAO GIỜ commit
 .env

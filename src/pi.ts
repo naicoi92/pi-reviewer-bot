@@ -17,12 +17,15 @@
 
 import {
   createAgentSession,
+  DefaultResourceLoader,
   SessionManager,
   type AgentSessionEvent,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { mkdir } from "node:fs/promises";
+import { exists } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import type { MrContext } from "./gitlab.ts";
 import type { MergeRequestDiffEntry, ReviewResult } from "./types.ts";
 import { createReviewTools, createInitialToolState, type ReviewToolState } from "./tools/index.ts";
@@ -45,7 +48,95 @@ const REVIEW_TIMEOUT_MS = Number(process.env.REVIEW_TIMEOUT_MS ?? 5 * 60 * 1000)
 // In containers the default ~/.pi may not be writable, so we override.
 const PI_AGENT_DIR = process.env.PI_AGENT_DIR ?? "/tmp/pi-agent";
 
-/** Build the prompt with MR context + diff. */
+/**
+ * Base system prompt — bot-controlled, chứa hướng dẫn dùng 12 tools + workflow.
+ *
+ * File `agents/code-reviewer.md` ở bot source được load runtime làm system prompt
+ * gốc. Project KHÔNG copy file này — họ chỉ append rules riêng qua
+ * `.pi/REVIEW_RULES.md` (xem `loadProjectRules`).
+ *
+ * Path resolution fallback chain (dev + compiled binary):
+ *   1. `BASE_PROMPT_PATH` env var (override explicit)
+ *   2. `<bot-src>/../agents/code-reviewer.md` — dev mode (bun run dev)
+ *   3. `/app/agents/code-reviewer.md` — Docker compiled binary (Dockerfile COPY)
+ *   4. `./agents/code-reviewer.md` — cwd-relative (systemd, local run)
+ *
+ * Khi Bun `--compile` standalone, `import.meta.dir` trỏ tới virtual FS (`/$bunfs/root`)
+ * → không dùng được. Phải dùng runtime path (env or hard-coded Docker path).
+ */
+const BASE_PROMPT_CANDIDATES = [
+  process.env.BASE_PROMPT_PATH,
+  join(dirname(import.meta.dir), "agents", "code-reviewer.md"), // dev: src/../agents
+  "/app/agents/code-reviewer.md", // Docker compiled binary
+  join(process.cwd(), "agents", "code-reviewer.md"), // systemd / local
+].filter((p): p is string => Boolean(p));
+
+let cachedBasePrompt: string | undefined;
+async function loadBasePrompt(): Promise<string> {
+  if (cachedBasePrompt !== undefined) return cachedBasePrompt;
+  const errors: string[] = [];
+  for (const candidate of BASE_PROMPT_CANDIDATES) {
+    try {
+      const file = Bun.file(candidate);
+      if (await file.exists()) {
+        cachedBasePrompt = await file.text();
+        console.log(`[pi] base prompt loaded from ${candidate} (${cachedBasePrompt.length} chars)`);
+        return cachedBasePrompt;
+      }
+    } catch (e) {
+      errors.push(`${candidate}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  throw new Error(
+    `Cannot load base prompt. Tried:\n${BASE_PROMPT_CANDIDATES.map((p) => `  - ${p}`).join("\n")}\nErrors: ${errors.join("; ")}`,
+  );
+}
+
+/**
+ * Project-specific review rules — optional, append vào base prompt.
+ *
+ * Project chỉ viết info về project của họ (stack, conventions, scope, license
+ * policy). Bot tự lo phần hướng dẫn tools — project KHÔNG phải copy.
+ *
+ * Lookup order (first match wins):
+ *   1. `.pi/REVIEW_RULES.md` — canonical path (recommend)
+ *   2. `.pi/agents/code-reviewer.md` — legacy path (deprecated, warn)
+ *
+ * Returns null nếu project không có file → bot review với default base prompt.
+ */
+const PROJECT_RULES_MAX_BYTES = 50_000;
+
+async function loadProjectRules(repoDir: string): Promise<string | null> {
+  const candidates = [
+    { path: ".pi/REVIEW_RULES.md", warn: false },
+    { path: ".pi/agents/code-reviewer.md", warn: true }, // legacy
+  ];
+  for (const c of candidates) {
+    const abs = join(repoDir, c.path);
+    if (!(await exists(abs))) continue;
+    if (c.warn) {
+      console.warn(
+        `[pi] ${c.path} is deprecated — migrate to .pi/REVIEW_RULES.md (will be removed in v0.5)`,
+      );
+    }
+    const text = await Bun.file(abs).text();
+    if (text.length > PROJECT_RULES_MAX_BYTES) {
+      console.warn(
+        `[pi] ${c.path} is ${text.length} bytes (> ${PROJECT_RULES_MAX_BYTES}) — truncating`,
+      );
+      return text.slice(0, PROJECT_RULES_MAX_BYTES) + "\n\n[... project rules truncated]";
+    }
+    return text;
+  }
+  return null;
+}
+
+/**
+ * Build the user prompt với MR context + diff.
+ *
+ * System prompt (hướng dẫn tools + workflow) đã được load qua ResourceLoader
+ * → không lặp lại ở đây. User prompt chỉ chứa data cụ thể của MR này.
+ */
 function buildPrompt(opts: {
   ctx: MrContext;
   diffEntries: MergeRequestDiffEntry[];
@@ -76,31 +167,6 @@ function buildPrompt(opts: {
     ``,
     `## MR Description`,
     ctx.description || "(no description provided)",
-    ``,
-    `## Available tools`,
-    `Read context:`,
-    `1. fetch_file(path) — read a file from the repo for additional context`,
-    `2. get_issue(iid) — read GitLab issue (description, comments, labels, linked MRs)`,
-    `3. list_mr_comments() — existing comments on this MR (idempotent re-review)`,
-    `4. list_mr_commits() — commit history (iteration context)`,
-    `5. list_wiki_pages() — list wiki slugs/titles (discover before get_wiki_page)`,
-    `6. get_wiki_page(slug) — GitLab wiki page (ADRs/runbooks outside repo)`,
-    `Write verdict:`,
-    `7. post_inline_comment(path, line, comment, severity) — line-specific DiffNote`,
-    `8. post_summary(markdown) — REQUIRED before approve/request_changes`,
-    `9. approve_mr(rationale) — approve (blocked if no summary or critical issues remain)`,
-    `10. request_changes(reason) — block merge`,
-    ``,
-    `## Workflow`,
-    `1. Read AGENTS.md (if present) for project conventions and per-layer rules.`,
-    `2. Read .pi/config.yaml (if present) for scope alignment settings.`,
-    `3. If 'Resolves: #N' in description AND scope.enabled: call get_issue(N) to verify alignment.`,
-    `4. If MR is an update (re-review): call list_mr_comments() to avoid duplicating prior feedback.`,
-    `5. Review the diff. Use fetch_file when you need neighbour code.`,
-    `6. If project stores ADRs/docs in Wiki: call list_wiki_pages() first, then get_wiki_page(slug).`,
-    `7. Post inline comments for each issue with appropriate severity.`,
-    `8. Call post_summary with your overall verdict.`,
-    `9. Call approve_mr (if 0 critical) OR request_changes (if ≥1 critical).`,
     ``,
     `## Diff`,
     "```diff",
@@ -199,6 +265,29 @@ export async function runPiReview(opts: {
 
   // Ensure agent dir exists (Pi writes settings/auth cache here) BEFORE creating session
   await mkdir(PI_AGENT_DIR, { recursive: true });
+
+  // Build ResourceLoader thủ công để inject base prompt + project rules.
+  // DefaultResourceLoader tự discovery .pi/SYSTEM.md nếu ta không pass systemPrompt —
+  // ta override để đảm bảo prompt gốc do bot control (project không copy tools guidance).
+  const basePrompt = await loadBasePrompt();
+  const projectRules = await loadProjectRules(opts.repoDir);
+  const appendSystemPrompt = projectRules ? [projectRules] : [];
+  console.log(
+    `[pi] system prompt: base=${basePrompt.length} chars, project append=${projectRules ? projectRules.length : 0} chars`,
+  );
+
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: opts.repoDir,
+    agentDir: PI_AGENT_DIR,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    systemPrompt: basePrompt,
+    appendSystemPrompt,
+  });
+  await resourceLoader.reload();
+  sessionOpts = { ...sessionOpts, resourceLoader };
 
   // Create session
   const { session } = await createAgentSession(sessionOpts as Parameters<typeof createAgentSession>[0]);

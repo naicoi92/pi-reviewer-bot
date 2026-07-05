@@ -1,6 +1,6 @@
 {
   "name": "pi-reviewer-bot",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "GitLab webhook bot — AI code review với Pi Coding Agent + Z.ai GLM-5.2 (Mức 3 full tool)",
   "type": "module",
   "private": true,

@@ -2,7 +2,7 @@
  * Per-MR shallow repo clone.
  *
  * Why clone at all (instead of just feeding the diff to Pi)?
- *   - The agent needs `AGENTS.md`, `.pi/agents/code-reviewer.md`, and
+ *   - The agent needs `AGENTS.md`, `.pi/REVIEW_RULES.md`, and
  *     `.pi/config.yaml` to know per-project review rules.
  *   - For Scope Alignment Check, it reads `docs/design/07-roadmap.md` and
  *     similar files referenced by the project config.

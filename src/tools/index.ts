@@ -1,5 +1,5 @@
 /**
- * Tool factory — builds 5 tools cho AI reviewer (Mức 3 full tool).
+ * Tool factory — builds 12 tools cho AI reviewer (Mức 3 full tool).
  *
  * Tools chia sẻ state qua `ToolContext` object. State mutation qua tools
  * để bot có thể post-check sau khi AI chạy xong (fail-safe approve/unapprove).
@@ -18,6 +18,8 @@ import { listMrCommentsTool } from "./list_mr_comments.ts";
 import { listMrCommitsTool } from "./list_mr_commits.ts";
 import { getWikiPageTool } from "./get_wiki_page.ts";
 import { listWikiPagesTool } from "./list_wiki_pages.ts";
+import { webSearchTool } from "./web_search.ts";
+import { fetchUrlTool } from "./fetch_url.ts";
 
 /**
  * Mutable state shared giữa các tools trong 1 review session.
@@ -89,7 +91,7 @@ function withCallCount(tool: AnyTool, ctx: ToolContext): AnyTool {
   } as AnyTool;
 }
 
-/** Build all 10 tools for a review session. */
+/** Build all 12 tools for a review session. */
 export function createReviewTools(ctx: ToolContext): AnyTool[] {
   return [
     // Read tools (no state mutation)
@@ -99,6 +101,8 @@ export function createReviewTools(ctx: ToolContext): AnyTool[] {
     withCallCount(listMrCommitsTool(ctx), ctx),
     withCallCount(listWikiPagesTool(ctx), ctx),
     withCallCount(getWikiPageTool(ctx), ctx),
+    withCallCount(webSearchTool(ctx), ctx),
+    withCallCount(fetchUrlTool(ctx), ctx),
     // Write tools (state mutation + GitLab API)
     withCallCount(postSummaryTool(ctx), ctx),
     withCallCount(postInlineCommentTool(ctx), ctx),
