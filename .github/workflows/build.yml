@@ -1,15 +1,24 @@
 # ─────────────────────────────────────────────────────────────
-# Build & push pi-reviewer-bot image lên GitHub Container Registry
+# Build & push pi-reviewer-bot image — Native multi-runner + merge
 #
-# Multi-arch build (amd64 + arm64) qua buildx trong 1 job duy nhất.
-# buildx tự tạo manifest list chứa cả 2 arch.
+# Pattern: mỗi arch build trên runner NATIVE (không QEMU emulation)
+# của arch đó (amd64 trên ubuntu-latest, arm64 trên ubuntu-24.04-arm),
+# push lên registry với digest riêng. Job merge sau đó combine các
+# digests thành 1 manifest list multi-arch cho tag `latest` / `main` / version.
+#
+# Lợi ích so với buildx multi-arch trên 1 runner:
+#   - Nhanh hơn nhiều (native build, không QEMU)
+#   - amd64 không phải đợi arm64 (build song song)
+#   - Tận dụng hardware runners của GitHub
+#
+# Reference: https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
 #
 # Trigger:
-#   - Push tag `v*`     → build + push, tag image với version + latest
-#   - Push branch main  → build + push, tag image với `main` (rolling)
-#   - PR                → build only (không push), verify Dockerfile không vỡ
+#   - Push tag `v*`     → build + push, tag với version + latest
+#   - Push branch main  → build + push, tag với `main`
+#   - PR                → build only (không push), verify Dockerfile
 #
-# Image output: ghcr.io/naicoi92/pi-reviewer-bot:{tag}
+# Image output: ghcr.io/naicoi92/pi-reviewer-bot:{tag} (multi-arch manifest)
 # ─────────────────────────────────────────────────────────────
 
 name: build-image
@@ -27,37 +36,47 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # ─── Build từng arch trên runner native ─────────────────────
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Mỗi arch build trên runner native (không QEMU)
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (cần cho cross-arch build)
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Mỗi arch push với tag suffix riêng để không ghi đè lẫn nhau.
+      # vd: pi-reviewer-bot:main-amd64, pi-reviewer-bot:main-arm64
+      # Job merge sẽ combine 2 tags này thành :main (manifest list).
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # Tag strategy:
-          #   v1.2.3 → :1.2.3, :v1.2.3, :1.2, :1, :latest
-          #   main   → :main
-          #   PR     → :pr-<number> (no push)
+          # Tags có suffix arch để tránh conflict khi 2 job push song song
+          # Vd branch main → :main-amd64, tag v1.2.3 → :1.2.3-amd64
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch,suffix=-${{ matrix.suffix }}
+            type=ref,event=pr,suffix=-${{ matrix.suffix }}
+            type=semver,pattern={{version}},suffix=-${{ matrix.suffix }}
+            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.suffix }}
+            type=semver,pattern={{major}},suffix=-${{ matrix.suffix }}
+            type=raw,value=latest-${{ matrix.suffix }},enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title=pi-reviewer-bot
             org.opencontainers.image.description=GitLab webhook bot — AI code review with Pi SDK + any LLM provider
@@ -71,17 +90,140 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push (multi-arch single invocation)
+      - name: Build & push single-arch image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          # Buildx tự build cả 2 arch + tạo manifest list multi-arch
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platform }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Cache layers giữa các build (rất tiết kiệm thời gian)
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: ${{ github.event_name != 'pull_request' && 'type=registry,ref=ghcr.io/naicoi92/pi-reviewer-bot:buildcache,mode=max' || '' }}
-          provenance: false  # simpler manifest, tránh lỗi buildx với provenance attestations
+          # Cache layers theo arch riêng
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.suffix }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:buildcache-{2},mode=max', env.REGISTRY, env.IMAGE_NAME, matrix.suffix) || '' }}
+          # Capture digest để job merge reference
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          provenance: false
+
+      # Export digest ra file để pass sang job merge
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          DIGEST="${{ steps.build.outputs.digest }}"
+          echo "Digest: ${DIGEST}"
+          echo "${DIGEST}" > "/tmp/digests/${{ matrix.suffix }}.txt"
+          # Also export platform-prefixed variant for imagetools
+          echo "${{ matrix.platform }}@${DIGEST}" >> "/tmp/digests/sources.txt"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.suffix }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─── Merge: combine 2 single-arch digests thành manifest list ─
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Download tất cả digest artifacts từ 2 build jobs
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Display digests
+        run: |
+          echo "=== Downloaded digests ==="
+          ls -la /tmp/digests/
+          echo ""
+          echo "=== Sources (platform@digest) ==="
+          cat /tmp/digests/sources.txt 2>/dev/null || echo "(no sources.txt)"
+
+      - name: Extract metadata for final tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag FINAL (không có suffix arch) — đây là manifest list multi-arch
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create multi-arch manifest list
+        run: |
+          set -e
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+          # Build list of source references: <image>@sha256:... cho mỗi arch
+          SOURCES=""
+          for f in /tmp/digests/amd64.txt /tmp/digests/arm64.txt; do
+            if [ -f "$f" ]; then
+              DIGEST=$(cat "$f" | tr -d '[:space:]')
+              SOURCES="${SOURCES} ${IMAGE}@${DIGEST}"
+            fi
+          done
+          echo "Sources:${SOURCES}"
+
+          # Tạo manifest list cho mỗi tag từ output metadata
+          for tag in $(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' '); do
+            if [ -z "$tag" ]; then continue; fi
+            echo "📦 Creating multi-arch manifest for ${tag}"
+            docker buildx imagetools create -t "${tag}" ${SOURCES}
+            echo "✅ Created ${tag}"
+          done
+
+          # Inspect kết quả
+          echo ""
+          echo "=== Verify manifest multi-arch ==="
+          for tag in $(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' '); do
+            if [ -z "$tag" ]; then continue; fi
+            echo "--- ${tag} ---"
+            docker buildx imagetools inspect "${tag}" --format "  {{.Manifest.Platform.OS}}/{{.Manifest.Platform.Architecture}}" 2>&1 | head -5
+          done
+
+      # Cleanup: xóa các tag single-arch tạm (suffix -amd64, -arm64)
+      - name: Cleanup arch-suffixed tags
+        continue-on-error: true
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          # Tags tạm cần xóa: main-amd64, main-arm64, latest-amd64, latest-arm64, v*-{amd64,arm64}
+          VERSION_TAG="${GITHUB_REF##*/}"
+          VERSION_TAG="${VERSION_TAG#v}"
+          for SUFFIX in amd64 arm64; do
+            for TAG in "main-${SUFFIX}" "latest-${SUFFIX}" "${VERSION_TAG}-${SUFFIX}"; do
+              if [ -n "$TAG" ]; then
+                echo "🗑️  Deleting tag ${IMAGE}:${TAG}"
+                # GHCR delete tag qua API (cần PAT với delete:packages — GITHUB_TOKEN không đủ)
+                # Skip nếu không có quyền — tags suffix không gây hại lớn
+                :
+              fi
+            done
+          done
+          echo "Note: arch-suffixed tags retained (need PAT with delete:packages to clean)"
