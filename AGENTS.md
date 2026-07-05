@@ -186,6 +186,7 @@ Xem [`docs/CONFIG.md`](docs/CONFIG.md) cho schema đầy đủ.
 | D9 | Flatten repo (không bot/ subdir) | Đơn giản, source là project chính |
 | D10 | CI wait qua pipeline webhook + stateful Map in-memory | Event-driven (không polling), không giữ slot semaphore khi chờ, per-project timeout override |
 | D11 | Cancel review cũ qua AbortController khi push mới | Tránh 2 review song song (race condition, duplicate comment, sai SHA diff) |
+| D12 | Unapprove đồng bộ khi push mới + block=true | Đóng merge window — approval cũ (cho SHA trước) bị revoke ngay, MR blocked trong suốt re-review |
 
 Xem [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) cho decision chi tiết.
 

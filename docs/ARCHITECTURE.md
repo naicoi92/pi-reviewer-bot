@@ -283,6 +283,24 @@ Cancel review cũ khi review mới bắt đầu (fix BUG 3):
 - Abort xảy ra giữa chừng tool call (vd approve đã gọi GitLab API) → không rollback. Trade-off chấp nhận được — rare, review mới sẽ cover với verdict mới.
 - Bot restart → inflight lost → user push retry (cùng pattern CI wait + bot error).
 
+### D12: Unapprove đồng bộ khi push mới + block=true
+
+**Chọn**: Khi `performReview` bắt đầu (sau load config) và `cfg.block.enabled = true`, gọi `unapproveMr(ctx)` đồng bộ **trước** khi fetch diff / CI wait / run review.
+
+**Lý do**:
+- Đóng "merge window" của BUG 4: khi push commit mới + project có GitLab "Reset approval on push" = OFF → approval cũ (cho SHA trước) vẫn còn hiệu lực → user có thể merge code chưa review trong window 30s-5 phút (hoặc 10+ phút nếu CI wait)
+- Unapprove idempotent (`gitlab.ts:unapproveMr` coi 404/405 = no-op) → an toàn cho MR mở lần đầu
+- Đặt sau `load config` để biết `block.enabled`; đặt trước `CI wait` để MR blocked cả khi đợi CI
+
+**Alternatives đã loại**:
+- ❌ **Chỉ depend GitLab "Reset approval on push"=ON** — không phải project nào cũng enable, bot không control
+- ❌ **Unapprove trong `request_changes` tool** — chỉ chạy khi AI verdict FAIL, không cover case AI đang review (chưa verdict)
+- ❌ **Poll approval state trong khi review** — phức tạp, tốn GitLab API call
+
+**Trade-off**:
+- 1 GitLab API call thêm mỗi review (cost nhỏ ~50ms)
+- Project có GitLab "Reset approval on push"=ON → unapprove no-op (idempotent) → không phá gì
+
 ## Risk register
 
 | Risk | Likelihood | Impact | Mitigation |
@@ -300,6 +318,7 @@ Cancel review cũ khi review mới bắt đầu (fix BUG 3):
 | Multi-pipeline race (branch fail + MR success) | Medium | Medium | Aggregate TẤT CẢ pipeline cùng SHA, require tất cả pass |
 | Review cũ bị abort giữa tool call (approve đã gọi) | Low | Low | Trade-off chấp nhận — review mới sẽ cover verdict |
 | Re-push khi đang review (race 2 review) | Medium | High | Cancel review cũ qua AbortController (D11) |
+| Push mới + block=true giữ approval cũ → merge code chưa review | Medium | High | Unapprove đồng bộ ở entry point performReview (D12) |
 
 ## Roadmap (post-MVP)
 

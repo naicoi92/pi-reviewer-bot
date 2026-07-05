@@ -179,6 +179,23 @@ export async function performReview(
         }
       }
 
+      // ─── BUG 4 fix: Revoke approval cũ trước khi review lại ───
+      // Khi push commit mới + block=true: approval cũ (cho SHA trước) phải bị
+      // revoke NGAY LẬP TỨC để MR blocked trong suốt window review lại
+      // (30s-5 phút, hoặc 10+ phút nếu CI wait). Tránh scenario code chưa review
+      // bị merge vì GitLab "Reset approval on push" = OFF giữ approval cũ.
+      //
+      // Idempotent: unapproveMr coi 404/405 (no approval to remove) là success →
+      // an toàn cho MR mở lần đầu hoặc MR chưa từng được bot approve.
+      if (cfg.block.enabled) {
+        const unapproveRes = await unapproveMr(ctx);
+        if (unapproveRes.ok) {
+          log(`unapproved (block=true) — MR blocked during review`);
+        } else {
+          log(`warn — unapprove failed: ${unapproveRes.error}; continuing review`);
+        }
+      }
+
       // ─── CI wait mode ────────────────────────────────────────
       // Khi `ci.require: true`, check pipeline status trước khi review:
       //   - CI running → enqueue pending, đợi pipeline webhook, return.
