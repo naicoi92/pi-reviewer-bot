@@ -1,6 +1,9 @@
 # ─────────────────────────────────────────────────────────────
 # Build & push pi-reviewer-bot image lên GitHub Container Registry
 #
+# Multi-arch build (amd64 + arm64) qua buildx trong 1 job duy nhất.
+# buildx tự tạo manifest list chứa cả 2 arch.
+#
 # Trigger:
 #   - Push tag `v*`     → build + push, tag image với version + latest
 #   - Push branch main  → build + push, tag image với `main` (rolling)
@@ -25,22 +28,16 @@ env:
 
 jobs:
   build:
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          # Multi-arch build: amd64 (hầu hết CI) + arm64 (Apple Silicon, Ampere runners)
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up QEMU (cần cho cross-arch build)
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -50,6 +47,10 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Tag strategy:
+          #   v1.2.3 → :1.2.3, :v1.2.3, :1.2, :1, :latest
+          #   main   → :main
+          #   PR     → :pr-<number> (no push)
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -70,50 +71,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build & push
+      - name: Build & push (multi-arch single invocation)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: ${{ matrix.platform }}
+          # Buildx tự build cả 2 arch + tạo manifest list multi-arch
+          platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
-          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}:buildcache-{2},mode=max', env.REGISTRY, env.IMAGE_NAME, matrix.platform == 'linux/arm64' && 'arm64' || 'amd64') || '' }}
-
-  # ─── Tạo manifest multi-arch sau khi build từng arch ─────
-  merge-manifest:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    permissions:
-      packages: write
-    steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Create multi-arch manifest
-        run: |
-          set -e
-          for tag in $(echo "${{ steps.meta.outputs.tags }}" | tr '\n' ' '); do
-            echo "📦 Creating manifest for ${tag}"
-            docker buildx imagetools create -t "${tag}" \
-              "${tag}" 2>/dev/null || true
-          done
+          # Cache layers giữa các build (rất tiết kiệm thời gian)
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=registry,ref=ghcr.io/naicoi92/pi-reviewer-bot:buildcache,mode=max' || '' }}
+          provenance: false  # simpler manifest, tránh lỗi buildx với provenance attestations
