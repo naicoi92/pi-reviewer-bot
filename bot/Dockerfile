@@ -25,6 +25,9 @@
 # ─── Stage 1: Build standalone binary với Bun --compile ──────
 FROM oven/bun:1.1-alpine AS builder
 
+# file utility để verify binary built (debug)
+RUN apk add --no-cache file
+
 WORKDIR /build
 
 # Copy manifest + lockfile trước (cache layer)
