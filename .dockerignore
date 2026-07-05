@@ -7,23 +7,21 @@
 .idea
 
 # Docs không cần trong image
-README.md
-LICENSE
 docs/
 *.md
-!bot/agents/*.md  # giữ agent prompts — cần cho runtime
+!agents/*.md  # giữ agent prompts — cần cho runtime
 
 # Test files
-bot/test/
+test/
 **/*.test.ts
 **/*.spec.ts
 
-# Bot local artifacts
-bot/node_modules
-bot/.env
-bot/.env.local
-bot/dist
-bot/bun.lockb
+# Local artifacts
+node_modules
+.env
+.env.local
+dist
+bun.lockb
 
 # OS noise
 .DS_Store

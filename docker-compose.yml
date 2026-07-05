@@ -16,7 +16,7 @@ services:
   pi-reviewer-bot:
     build:
       context: .
-      dockerfile: bot/Dockerfile
+      dockerfile: Dockerfile
     image: pi-reviewer-bot:latest
     container_name: pi-reviewer-bot
     restart: unless-stopped

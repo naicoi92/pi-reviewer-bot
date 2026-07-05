@@ -1,163 +1,145 @@
 # pi-reviewer-bot
 
-Docker image + webhook bot service cho **AI code review trên GitLab** với [Pi Coding Agent](https://pi.dev) SDK + [Z.ai GLM Coding Plan](https://z.ai/subscribe) (model GLM-5.2).
+[![Build](https://github.com/naicoi92/pi-reviewer-bot/actions/workflows/build.yml/badge.svg)](https://github.com/naicoi92/pi-reviewer-bot/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docker](https://img.shields.io/badge/Docker-Alpine%20%7E115MB-blue)](https://github.com/naicoi92/pi-reviewer-bot/pkgs/container/pi-reviewer-bot)
 
-**Kiến trúc Mức 3 full tool**: AI nhận 5 tools (fetch_file, post_inline_comment, post_summary, approve_mr, request_changes) và tự decide approve/request_changes qua tool call — không cần parse verdict regex.
+**AI code review bot cho GitLab** — webhook service nhận MR events, dùng [Pi Coding Agent SDK](https://pi.dev) để review, và tự approve/request_changes qua tool calls.
 
-Có **2 chế độ** sử dụng — chọn tùy nhu cầu:
+Bot hỗ trợ **bất kỳ LLM provider nào** Pi hỗ trợ (40+): Z.ai GLM, OpenAI GPT, Anthropic Claude, DeepSeek, Google Gemini, Bedrock, Vertex, Ollama... Bạn chỉ cần set API key của provider muốn dùng.
 
-| Mode | Khi nào | Files |
-|---|---|---|
-| **🤖 Webhook Bot** (recommended) | Multi-project, muốn add webhook 1 lần rồi quên | [`bot/`](bot/) |
-| **🐳 CI Image** | 1 project, dùng trong `.gitlab-ci.yml` job | [`Dockerfile`](Dockerfile) (root) |
+## Kiến trúc — Mức 3 Full Tool
 
----
+AI reviewer có **10 tools** và tự decide approve/request_changes qua tool call (không parse verdict regex):
 
-## 🤖 Webhook Bot — "GitHub App cho GitLab"
+| Nhóm | Tools |
+|---|---|
+| **Read context** | `fetch_file`, `get_issue`, `list_mr_comments`, `list_mr_commits`, `list_wiki_pages`, `get_wiki_page` |
+| **Write verdict** | `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` |
 
-Service nhận GitLab webhook → spawn Pi review → post comment. Project nào muốn AI review chỉ cần add webhook 1 lần.
+Guardrail: `approve_mr` block nếu chưa `post_summary` hoặc còn critical unresolved.
 
-**Deploy với Docker (chạy bất cứ đâu):**
+## Quick Start
 
 ```bash
-cd bot
-fly launch --no-deploy
-fly secrets set WEBHOOK_SECRET=$(openssl rand -hex 16)
-fly secrets set GITLAB_API_TOKEN=glpat-... ZAI_API_KEY=zai-...
-fly deploy
+# 1. Pull image (~115MB, multi-arch amd64+arm64)
+docker pull ghcr.io/naicoi92/pi-reviewer-bot:latest
+
+# 2. Configure
+cp .env.example .env
+# Edit .env: WEBHOOK_SECRET, GITLAB_API_TOKEN, và 1 LLM API key (vd ZAI_API_KEY)
+
+# 3. Run
+docker compose up -d
+
+# 4. Add webhook trong GitLab project:
+#    URL: https://your-host/webhook
+#    Secret: <WEBHOOK_SECRET từ .env>
+#    Trigger: ✅ Merge request events
 ```
 
-**Add bot cho project GitLab:**
+Xong. Mở MR → bot review trong ~30s-3 phút.
 
-```
-Settings → Webhook
-  URL: https://pi-bot.example.com/webhook
-  Secret: <WEBHOOK_SECRET>
-  Trigger: ✅ Merge request events
-```
-
-Xong. Mở MR → bot auto-review trong 30s-3min.
-
-📖 **Docs**: [Setup](docs/SETUP.md) · [Project config](docs/CONFIG.md) · [Architecture](docs/ARCHITECTURE.md) · [Multi-project ops](docs/MULTIPROJECT.md)
-
----
-
-## 🐳 CI Image — cho `.gitlab-ci.yml`
-
-Docker image pre-bake Pi + glab CLI. Dùng trong GitLab CI:
-
-```yaml
-# .gitlab-ci.yml (của project khác)
-pi:review:
-  image: ghcr.io/naicoi92/pi-reviewer:latest
-  script:
-    - pi --agent code-reviewer --model zai-anthropic/glm-5.2 "..."
-```
-
-Image build tự động qua GitHub Actions khi push tag `v*`. Public trên GHCR.
-
----
+📖 **Full setup**: [docs/SETUP.md](docs/SETUP.md)
+📖 **Integrate vào project khác**: [docs/INTEGRATION.md](docs/INTEGRATION.md)
 
 ## Tính năng
 
-- ✅ **Mức 3 Full Tool** — AI có 5 tools: `fetch_file`, `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` (tự decide approve qua tool call, không regex)
+- ✅ **Multi-provider** — Z.ai / OpenAI / Anthropic / DeepSeek / Gemini / Ollama / bất kỳ Pi provider nào
+- ✅ **10 tools** — AI có tools để fetch context, post inline comments, approve, request changes
 - ✅ **Inline line comments** — DiffNote qua GitLab Discussions API với position hash
-- ✅ **Multi-project** — 1 bot instance phục vụ mọi project GitLab
-- ✅ **Auto-review** khi MR mở hoặc push commit mới
-- ✅ **Merge gate** — block MR cho đến khi bot approve (GitLab Approval Rule + `block.enabled: true`)
-- ✅ **Pi Coding Agent SDK in-process** — không subprocess, type-safe, Z.ai native
-- ✅ **Z.ai GLM-5.2** (1M context, $12.6/mo Coding Plan)
-- ✅ **Per-project config** qua `.pi/config.yaml`
-- ✅ **Concurrency + rate limit** — global 3 song song, 10s cooldown per project
-- ✅ **`/stats` endpoint** — observability multi-project
+- ✅ **Merge gate** — block MR cho đến khi bot approve (`block.enabled: true` + GitLab Approval Rule)
+- ✅ **Multi-project** — 1 bot instance phục vụ mọi GitLab project qua `.pi/config.yaml`
+- ✅ **Per-project config** — mỗi project customize language, scope rules, model
+- ✅ **Concurrency + rate limit** — global semaphore + per-project cooldown
+- ✅ **`/stats` endpoint** — observability per-project
 - ✅ **Guardrail chống hallucinate approve** — phải post_summary trước + 0 critical unresolved
 - ✅ **Fail-safe** — bot unapprove nếu AI crash trước khi gọi verdict tool
-
----
 
 ## Cấu trúc repo
 
 ```
 pi-reviewer-bot/
-├── Dockerfile                    # CI image (node:22-slim + pi + glab)
-├── .dockerignore
-├── .github/workflows/build.yml   # build CI image → ghcr.io
-│
-├── bot/                          # webhook bot service
-│   ├── package.json
-│   ├── tsconfig.json
-│   ├── Dockerfile                # bot image (oven/bun:1.1-debian)
-# docker-compose.yml ở root
-│   ├── .env.example
-│   ├── src/
-│   │   ├── index.ts              # Hono app entrypoint
-│   │   ├── webhook.ts            # verify token + filter + orchestrate
-│   │   ├── gitlab.ts             # @gitbeaker/rest wrapper
-│   │   ├── repo.ts               # shallow clone per-MR
-│   │   ├── pi.ts           # Pi SDK in-process review
-│   │   ├── config.ts             # parse .pi/config.yaml
-│   │   └── types.ts              # MR webhook payload types
-│   └── test/
-│       └── webhook.test.ts       # 23 unit tests
-│
+├── Dockerfile                  # Multi-stage: Bun --compile + Alpine runtime (~115MB)
+├── docker-compose.yml          # Production deploy convenience
+├── package.json                # Bun project deps
+├── agents/
+│   └── code-reviewer.md        # System prompt cho AI reviewer (10 tools)
+├── src/
+│   ├── index.ts                # Hono app: POST /webhook, GET /healthz, /stats
+│   ├── webhook.ts              # Verify token + filter + orchestrate review
+│   ├── gitlab.ts               # GitLab API client (approve, comment, get_issue, ...)
+│   ├── repo.ts                 # Shallow clone source branch per-MR
+│   ├── pi.ts                   # Pi SDK wrapper — createAgentSession + subscribe
+│   ├── config.ts               # .pi/config.yaml loader
+│   ├── stats.ts                # Per-project observability
+│   ├── limiter.ts              # Semaphore + rate limit
+│   ├── types.ts                # Webhook payload types
+│   └── tools/                  # 10 custom tools (defineTool)
+│       ├── index.ts            # Tool factory + shared state
+│       ├── result.ts           # AgentToolResult helpers (ok/err/done)
+│       ├── fetch_file.ts       # Read file (path traversal guard)
+│       ├── get_issue.ts        # GitLab issue + comments + linked MRs
+│       ├── list_mr_comments.ts # Existing comments (idempotent re-review)
+│       ├── list_mr_commits.ts  # Commit history
+│       ├── list_wiki_pages.ts  # Wiki slug discovery
+│       ├── get_wiki_page.ts    # Read wiki page
+│       ├── post_summary.ts     # Top-level verdict (required before approve)
+│       ├── post_inline_comment.ts  # DiffNote với severity + line validation
+│       ├── approve_mr.ts       # Approve (guardrail: summary + 0 critical)
+│       └── request_changes.ts  # Unapprove (block merge)
+├── test/
+│   └── webhook.test.ts         # 22 unit tests
 └── docs/
-    ├── SETUP.md                  # deploy Docker + add webhook
-    ├── CONFIG.md                 # .pi/config.yaml schema
-    └── ARCHITECTURE.md           # design + decision log
+    ├── SETUP.md                # Deploy guide (Docker, K8s, systemd)
+    ├── INTEGRATION.md          # Setup bot cho project khác (cho AI consumer)
+    ├── CONFIG.md               # .pi/config.yaml schema
+    ├── ARCHITECTURE.md         # Design + decision log
+    └── MULTIPROJECT.md         # Multi-project operations
 ```
 
----
+## LLM Providers
 
-## Tech stack
+Bot dùng [Pi Coding Agent SDK](https://pi.dev) → tự động hỗ trợ 40+ providers. Set API key env var của provider bạn muốn dùng:
 
-| Layer | Tech | Lý do |
+| Provider | Env var | Cost |
 |---|---|---|
-| Runtime | [Bun](https://bun.sh) 1.1+ | Fast startup, native TS, built-in test runner |
-| HTTP framework | [Hono](https://hono.dev) | Minimal, fast, web-standard |
-| GitLab API | [@gitbeaker/rest](https://gitlab.com/gitlab-org/gitbeaker/) | Typed, maintained, full coverage |
-| AI agent SDK | [Pi Coding Agent](https://pi.dev) (`@earendil-works/pi-coding-agent`) | In-process SDK, custom tools, MIT |
-| LLM | [Z.ai GLM-5.2](https://z.ai) | 1M context, $12.6/mo Coding Plan, native trong Pi |
-| Hosting | Docker (Alpine runtime, multi-arch) | Chạy bất cứ đâu, ~115MB image |
-| Registry | [GHCR](https://ghcr.io) | Public image, free for public repos |
+| **Z.ai** (recommend) | `ZAI_API_KEY` | $12.6/mo flat (Coding Plan) |
+| OpenAI | `OPENAI_API_KEY` | Pay-as-you-go |
+| Anthropic | `ANTHROPIC_API_KEY` | Pay-as-you-go |
+| DeepSeek | `DEEPSEEK_API_KEY` | Pay-as-you-go (rẻ nhất) |
+| Google Gemini | `GOOGLE_GENERATIVE_AI_API_KEY` | Free tier + paid |
+| AWS Bedrock | AWS credentials | Pay-as-you-go |
+| Ollama (local) | (không cần key) | Free |
 
----
+Set `DEFAULT_MODEL=provider/model` trong `.env` hoặc để trống để Pi auto-detect.
 
-## Develop locally
+Full list: `pi --list-models` hoặc https://pi.dev/models
+
+## Tech Stack
+
+| Layer | Tech |
+|---|---|
+| Runtime | [Bun](https://bun.sh) 1.1+ (compiled standalone binary) |
+| HTTP framework | [Hono](https://hono.dev) |
+| GitLab API | [@gitbeaker/rest](https://gitlab.com/gitlab-org/gitbeaker/) |
+| AI agent | [Pi Coding Agent](https://pi.dev) SDK (in-process, custom tools) |
+| LLM | Bất kỳ Pi provider (Z.ai GLM, OpenAI, Anthropic, ...) |
+| Image | Alpine (~115MB, multi-arch amd64+arm64) |
+
+## Develop
 
 ```bash
-cd bot
 bun install
-cp .env.example .env  # edit values
+cp .env.example .env  # điền ZAI_API_KEY hoặc provider khác
+bun run dev            # hot reload tại localhost:3000
 
-# Run with hot reload
-bun run dev
-
-# Test
-bun test
-
-# Typecheck
-bun run typecheck
+bun test               # 22 tests
+bun run typecheck      # strict TypeScript
 ```
 
-Test webhook locally với curl:
-
-```bash
-curl -X POST http://localhost:3000/webhook \
-  -H "X-Gitlab-Token: $WEBHOOK_SECRET" \
-  -H "Content-Type: application/json" \
-  -d @test/fixtures/mr-open-payload.json
-```
-
----
+Xem [CONTRIBUTING.md](CONTRIBUTING.md) để đóng góp.
 
 ## License
 
-MIT. Xem [LICENSE](LICENSE).
-
-## Tài liệu
-
-- 📖 [Setup Docker + GitLab webhook](docs/SETUP.md)
-- 📖 [Per-project config schema](docs/CONFIG.md)
-- 📖 [Architecture + decisions](docs/ARCHITECTURE.md)
-- 🔗 [Z.ai Coding Plan](https://z.ai/subscribe)
-- 🔗 [Pi docs](https://pi.dev/docs/)
+[MIT](LICENSE) © 2026 Nai Coi

@@ -1,8 +1,0 @@
-node_modules/
-dist/
-bun.lockb
-.env
-.env.local
-*.log
-.DS_Store
- fly.toml.local

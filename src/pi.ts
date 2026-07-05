@@ -27,7 +27,19 @@ import type { MrContext } from "./gitlab.ts";
 import type { MergeRequestDiffEntry, ReviewResult } from "./types.ts";
 import { createReviewTools, createInitialToolState, type ReviewToolState } from "./tools/index.ts";
 
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL ?? "zai/glm-5.2";
+/**
+ * Model resolution priority (cao → thấp):
+ *   1. .pi/config.yaml → llm.model (per-project override)
+ *   2. DEFAULT_MODEL env var (deployment-wide default)
+ *   3. Pi auto-detect (lấy provider đầu tiên có API key trong env)
+ *
+ * Pi SDK supports 40+ providers: Z.ai, OpenAI, Anthropic, DeepSeek, Google,
+ * Bedrock, Vertex, Ollama, v.v. Set API key env var tương ứng (ZAI_API_KEY,
+ * OPENAI_API_KEY, ANTHROPIC_API_KEY, ...) — Pi tự detect.
+ *
+ * Xem full list: `pi --list-models` hoặc https://pi.dev/models
+ */
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL ?? "";
 const REVIEW_TIMEOUT_MS = Number(process.env.REVIEW_TIMEOUT_MS ?? 5 * 60 * 1000);
 // Pi writes settings/auth cache here — must be writable by the bot process.
 // In containers the default ~/.pi may not be writable, so we override.
@@ -103,17 +115,22 @@ export interface PiReviewResult extends ReviewResult {
 
 /**
  * Run a review with Pi SDK in-process.
+ *
+ * Model resolution:
+ *   opts.model (from .pi/config.yaml) > DEFAULT_MODEL env > Pi auto-detect
+ *
+ * Format: "provider/model" e.g. "zai/glm-5.2", "openai/gpt-4o", "deepseek/deepseek-chat".
+ * Empty/undefined → Pi picks first available provider from auth.
  */
 export async function runPiReview(opts: {
   ctx: MrContext;
   repoDir: string;
   diffEntries: MergeRequestDiffEntry[];
-  /** "provider/model" e.g. "zai/glm-5.2". Default = env DEFAULT_MODEL. */
+  /** "provider/model" e.g. "zai/glm-5.2". Override from .pi/config.yaml. */
   model?: string;
 }): Promise<PiReviewResult> {
   const startedAt = Date.now();
-  const modelId = opts.model ?? DEFAULT_MODEL;
-  const [provider, model] = modelId.split("/");
+  const modelId = opts.model || DEFAULT_MODEL;  // empty string falls through to Pi default
 
   // Tool state — shared across all tools in this review
   const toolState = createInitialToolState();
@@ -125,35 +142,51 @@ export async function runPiReview(opts: {
   };
   const tools: ToolDefinition<any, any, any>[] = createReviewTools(toolCtx);
 
-  // Resolve model
-  let resolvedModel: ReturnType<typeof getBuiltinModel>;
-  try {
-    resolvedModel = getBuiltinModel(provider as never, model as never);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      markdown: "",
-      eventCount: 0,
-      error: `Model ${modelId} not found: ${msg}`,
-      durationMs: Date.now() - startedAt,
-      toolState,
-    };
-  }
-
-  // Ensure agent dir exists (Pi writes settings/auth cache here)
-  await mkdir(PI_AGENT_DIR, { recursive: true });
-
-  // Create session — no built-in tools, only our custom 5
-  const { session } = await createAgentSession({
+  // Resolve model: explicit "provider/model" → getBuiltinModel; empty → let Pi auto-pick
+  let sessionOpts: ConstructorParameters<typeof Object>[0] = {
     cwd: opts.repoDir,
     agentDir: PI_AGENT_DIR,
-    model: resolvedModel,
     noTools: "all",
     customTools: tools,
-    // Ephemeral — don't persist session to disk
     sessionManager: SessionManager.inMemory(opts.repoDir),
-  });
+  };
+
+  if (modelId) {
+    const slashIdx = modelId.indexOf("/");
+    if (slashIdx <= 0) {
+      return {
+        ok: false,
+        markdown: "",
+        eventCount: 0,
+        error: `Invalid model '${modelId}'. Expected format 'provider/model' e.g. 'zai/glm-5.2', 'openai/gpt-4o'.`,
+        durationMs: Date.now() - startedAt,
+        toolState,
+      };
+    }
+    const provider = modelId.slice(0, slashIdx);
+    const model = modelId.slice(slashIdx + 1);
+    try {
+      const resolvedModel = getBuiltinModel(provider as never, model as never);
+      sessionOpts = { ...sessionOpts, model: resolvedModel };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        markdown: "",
+        eventCount: 0,
+        error: `Model '${modelId}' not found. Run 'pi --list-models' to see available. Original: ${msg}`,
+        durationMs: Date.now() - startedAt,
+        toolState,
+      };
+    }
+  }
+  // If modelId empty → don't pass `model`, Pi will auto-pick from auth.json
+
+  // Ensure agent dir exists (Pi writes settings/auth cache here) BEFORE creating session
+  await mkdir(PI_AGENT_DIR, { recursive: true });
+
+  // Create session
+  const { session } = await createAgentSession(sessionOpts as Parameters<typeof createAgentSession>[0]);
 
   // Subscribe to events. Use Promise-based wait for agent_end (no polling).
   let markdown = "";

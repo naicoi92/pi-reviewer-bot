@@ -24,7 +24,7 @@ git clone https://github.com/naicoi92/pi-reviewer-bot.git
 cd pi-reviewer-bot
 
 # Build multi-arch hoặc single-arch
-docker build -t pi-reviewer-bot:latest -f bot/Dockerfile .
+docker build -t pi-reviewer-bot:latest -f Dockerfile .
 
 # Verify
 docker images pi-reviewer-bot --format "{{.Repository}}:{{.Tag}} — {{.Size}}"
@@ -161,7 +161,7 @@ Nếu VPS có Bun 1.1+:
 
 ```bash
 # Build binary local
-cd bot
+
 bun install
 bun build --compile --outfile=/usr/local/bin/pi-reviewer-bot ./src/index.ts
 ```

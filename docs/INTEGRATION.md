@@ -21,7 +21,7 @@ block:
 EOF
 
 # 2. Copy agent prompt (tùy chỉnh)
-cp /path/to/pi-reviewer-bot/bot/agents/code-reviewer.md .pi/agents/
+cp /path/to/pi-reviewer-bot/agents/code-reviewer.md .pi/agents/
 
 # 3. Add webhook trong GitLab
 # Settings → Webhook → URL: https://pi-bot.example.com/webhook → Secret: ...
@@ -407,7 +407,7 @@ Bot comment phải có scope alignment output:
 
 Xem thêm:
 - [`docs/CONFIG.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md) — full schema `.pi/config.yaml`
-- [`bot/agents/code-reviewer.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/bot/agents/code-reviewer.md) — agent prompt template
+- [`agents/code-reviewer.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/agents/code-reviewer.md) — agent prompt template
 
 ---
 
