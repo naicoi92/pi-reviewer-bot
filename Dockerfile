@@ -58,7 +58,8 @@ RUN npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" --omit=dev \
     && (pi --version 2>&1 || echo "pi installed (no --version flag)")
 
 # ─── 4. Setup non-root user (GitLab CI / GH Actions best practice) ──
-RUN useradd --create-home --shell /bin/bash --uid 1000 reviewer \
+# Dùng UID 1001 (UID 1000 thường đã tồn tại trong node:22-slim as 'node' user)
+RUN useradd --create-home --shell /bin/bash --uid 1001 reviewer \
     && mkdir -p /cache/pi /work \
     && chown -R reviewer:reviewer /cache /work
 
