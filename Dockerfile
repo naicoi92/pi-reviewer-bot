@@ -56,13 +56,18 @@ RUN ls -lh /build/pi-reviewer-bot && file /build/pi-reviewer-bot
 FROM alpine:3.20
 
 # Cài: git (clone repo per-MR), ca-certificates (HTTPS), tzdata (timezone),
-# wget (healthcheck), tini (init để handle signal đúng cách)
+# wget (healthcheck), tini (init để handle signal đúng cách),
+# libstdc++ + libgcc (Bun binary cần glibc libs — Alpine dùng musl nhưng
+# các lib này cung cấp compat layer cho binary compiled với GCC).
 RUN apk add --no-cache \
       git \
       ca-certificates \
       tzdata \
       wget \
       tini \
+      libstdc++ \
+      libgcc \
+      libc6-compat \
     && update-ca-certificates \
     && addgroup -S -g 1001 bot \
     && adduser -S -D -H -u 1001 -G bot bot \
