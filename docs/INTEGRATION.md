@@ -5,7 +5,10 @@
 >
 > Doc này hướng dẫn từng bước để tích hợp pi-reviewer-bot vào project —
 > **không phải setup bản thân bot service**. Nếu bạn cần deploy bot, xem
-> [SETUP.md](SETUP.md) trước, rồi quay lại đây.
+> [SETUP.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SETUP.md) trước, rồi quay lại đây.
+>
+> 🤖 **AI agent? Đọc thêm [SKILLS.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SKILLS.md)** — luồng công việc hàng ngày
+> với bot: tạo MR, đợi review, xử lý feedback, re-trigger khi cần, debug "bot im lặng".
 
 ## TL;DR — 3 bước
 
@@ -40,7 +43,7 @@ Trước khi tích hợp, đảm bảo project có:
 |---|---|
 | **Repo hosted trên GitLab** (gitlab.com hoặc self-managed) | `git remote -v` có `gitlab.com` |
 | **Bot PAT là member của project** (role Developer+) | Project → Members → có bot account |
-| **Webhook URL truy cập được từ GitLab** | Bot service đã deploy (xem [SETUP.md](SETUP.md)) |
+| **Webhook URL truy cập được từ GitLab** | Bot service đã deploy (xem [SETUP.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SETUP.md)) |
 | **`AGENTS.md` ở repo root** (khuyến nghị) | `ls AGENTS.md` — Pi tự đọc để hiểu conventions |
 
 ---
@@ -190,7 +193,8 @@ Project → Settings → Webhook
 |---|---|
 | **URL** | `https://<bot-host>/webhook` (hỏi admin pi-reviewer-bot) |
 | **Secret token** | `<WEBHOOK_SECRET>` (cùng giá trị set trong bot env) |
-| **Trigger** | ✅ **Merge request events** |
+| **Trigger** | ✅ **Merge request events** (bắt buộc) |
+|  | ✅ **Pipeline events** (chỉ khi dùng `ci.require: true` ở Bước 6) |
 | **SSL verification** | ✅ Enable |
 
 Click **Add webhook** → **Test → Merge request events** để verify.
@@ -219,6 +223,78 @@ User vẫn có thể manually approve để override khẩn cấp.
 
 ---
 
+## Bước 6 (tùy chọn) — Enable CI wait mode
+
+Muốn bot **chỉ review khi CI pass** (pipeline success)? Bật CI wait mode:
+
+### Khi nào nên bật?
+
+- ✅ Project có CI chạy lint+test → tránh review code mà CI sẽ catch lỗi
+- ✅ Project nhiều contributor → giảm noise false-positive trên code chưa chạy được
+- ❌ Project chưa setup CI → bot vẫn review luôn (lenient default)
+- ❌ Project docs-only → CI không có ý nghĩa
+
+### Setup
+
+**1. Project phải có `.gitlab-ci.yml`** chạy ít nhất 1 job (test/lint). Bot check pipeline status qua GitLab API.
+
+**2. `.pi/config.yaml`:**
+
+```yaml
+ci:
+  require: true
+  # waitTimeoutMs: 900000   # 15 phút — chỉ set nếu CI chậm (E2E, monorepo)
+```
+
+**3. GitLab webhook phải enable thêm Pipeline events:**
+
+```
+Project → Settings → Webhook → edit webhook có sẵn
+  Trigger: ✅ Merge request events (đã có)
+           ✅ Pipeline events (BẬT THÊM)
+```
+
+> ⚠️ Quên enable "Pipeline events" → bot enqueue pending nhưng không nhận được signal CI finish → review chỉ chạy sau timeout (10 phút default).
+
+### Workflow
+
+```
+1. Dev mở MR → GitLab gửi MR webhook tới bot
+2. Bot clone + load .pi/config.yaml + check pipeline status:
+   ├── CI running → post "⏸ Đợi CI pass" + enqueue pending
+   │   ↓ (sau vài phút)
+   │   CI pass → GitLab gửi pipeline webhook (status=success)
+   │   ↓
+   │   Bot trigger review tự động
+   ├── CI failed → post "🚫 CI failed" + DONE
+   ├── CI pass → review luôn
+   └── no pipeline → review luôn (lenient)
+3. Bot review + post comments + approve/request_changes
+```
+
+### Edge cases
+
+| Case | Behavior |
+|---|---|
+| CI chạy >timeout (default 10 phút) | Bot proceed review anyway + log |
+| Bot restart giữa lúc đang đợi CI | Pending lost → push commit để retry |
+| Re-push commit | Entry mới override entry cũ (per-SHA) |
+| Project chưa setup CI | Bot review luôn (không block) |
+
+### Timeout — per-project override
+
+Mặc định bot service set `CI_WAIT_TIMEOUT_MS=600000` (10 phút). Project CI chậm có thể override:
+
+```yaml
+ci:
+  require: true
+  waitTimeoutMs: 1_800_000   # 30 phút — cho monorepo có E2E
+```
+
+Xem [`docs/CONFIG.md#ci-integration`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md#ci-integration) cho full schema + priority chain.
+
+---
+
 ## Workflow review từ góc nhìn project
 
 ```
@@ -230,7 +306,12 @@ User vẫn có thể manually approve để override khẩn cấp.
    ↓
 4. Bot đọc .pi/config.yaml + .pi/agents/code-reviewer.md + AGENTS.md
    ↓
-5. Bot spawn Pi Coding Agent với GLM-5.2:
+5. (Nếu ci.require=true) Bot check pipeline status:
+   ├── CI running → đợi pipeline webhook → trigger review khi CI pass
+   ├── CI failed → post note + DONE
+   └── CI pass / no pipeline → review luôn
+   ↓
+6. Bot spawn Pi Coding Agent với GLM-5.2:
    - AI dùng 10 tools để review
    - fetch_file khi cần context
    - get_issue(iid) nếu Resolves: #N
@@ -239,7 +320,7 @@ User vẫn có thể manually approve để override khẩn cấp.
    - post_summary(markdown)
    - approve_mr(rationale) HOẶC request_changes(reason)
    ↓
-6. Comment xuất hiện trong MR sau ~30s-3 phút
+7. Comment xuất hiện trong MR sau ~30s-3 phút (sau khi CI pass)
 ```
 
 ---
@@ -386,6 +467,9 @@ Bot comment phải có scope alignment output:
 | Webhook Test 401 | WEBHOOK_SECRET sai | Check với admin bot service |
 | Review comment thiếu | Bot PAT không phải member | Project → Members → invite bot |
 | Skip review | Title chứa "wip"/"dnr" | Đổi title |
+| Bot đợi hoài không review (CI wait mode) | Quên enable "Pipeline events" webhook | Project → Webhook → tick thêm Pipeline events |
+| CI pass nhưng bot không review | `ci.require: false` (chưa bật CI wait) | Set `ci.require: true` trong `.pi/config.yaml` |
+| Review bị skip sau CI fail | Pipeline status = failed/canceled | Fix CI rồi push commit mới |
 
 ### Review chất lượng kém
 
@@ -407,6 +491,7 @@ Bot comment phải có scope alignment output:
 ## Per-project config tham khảo
 
 Xem thêm:
+- [`docs/SKILLS.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SKILLS.md) — **workflow skills cho AI agents** (setup webhook, skip reasons, re-trigger, debug)
 - [`docs/CONFIG.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md) — full schema `.pi/config.yaml`
 - [`agents/code-reviewer.md`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/agents/code-reviewer.md) — agent prompt template
 

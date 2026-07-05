@@ -13,12 +13,15 @@ Tài liệu design cho webhook service. Cập nhật khi architecture thay đổ
 └─────────────┘                       │  2. filter action=open/update   │
        ▲                              │  3. skip WIP/dnr                │
        │                              │  4. respond 200 ngay            │
-   add webhook 1 lần                  │  5. async: clone repo           │
-                                      │  6. load .pi/config.yaml  │
-                                      │  7. fetch MR diff (GitLab API)  │
-                                      │  8. spawn `pi` SDK        │
-                                      │  9. parse JSONL → markdown      │
-                                      │ 10. post comment (GitLab API)   │
+       │   webhook pipeline success   │  5. async: clone repo           │
+       │   ─────────────────────────→ │  6. load .pi/config.yaml  │
+       │   (chỉ khi ci.require=true)  │  7. CI wait check (if ci.require)│
+       │                              │     CI running → enqueue pending│
+       │                              │     CI pass → fetch diff        │
+       │                              │  8. fetch MR diff (GitLab API)  │
+       │                              │  9. spawn `pi` SDK        │
+       │                              │ 10. parse JSONL → markdown      │
+       │                              │ 11. post comment (GitLab API)   │
                                       └─────────────────────────────────┘
                                                   ▲
                                                   │
@@ -26,6 +29,7 @@ Tài liệu design cho webhook service. Cập nhật khi architecture thay đổ
                                   │ ZAI_API_KEY env (Coding Plan)  │
                                   │ GITLAB_API_TOKEN env (bot PAT) │
                                   │ WEBHOOK_SECRET env (verify)    │
+                                  │ CI_WAIT_TIMEOUT_MS env (10min) │
                                   └───────────────────────────────┘
 ```
 
@@ -101,6 +105,32 @@ Timeout 5 phút (configurable `REVIEW_TIMEOUT_MS`).
 ### 7. Config loader (`src/config.ts`)
 
 Parse `.pi/config.yaml` từ cloned repo. Merge với default. Validate types (reject `language: "fr"`, fall back to default).
+
+### 8. CI wait coordinator (`src/ciwait.ts`)
+
+Bridge giữa MR webhook và Pipeline webhook khi project bật `ci.require: true`:
+
+- **State**: in-memory `Map<projectId:sha, PendingReview>` — không persist.
+- **Flow**:
+  1. MR webhook đến + CI running → `enqueuePendingReview` lưu payload + set timeout GC.
+  2. Pipeline webhook `status=success` → `consumePendingReview` lấy payload + clear timeout → trigger `performReview({ skipCiCheck: true })`.
+  3. Timeout fire (CI >10 phút) → callback → review anyway.
+- **Key là `projectId:sha`** — match pipeline với MR chính xác tại commit, robust với re-push.
+- **Secondary index `projectId:mrIid → sha`** — clear entry cũ khi re-push (fix BUG 1).
+- **Trade-off**: mất khi bot restart → user push retry (cùng pattern bot error hiện tại).
+
+### 9. In-flight review coordinator (`src/inflight.ts`)
+
+Cancel review cũ khi review mới bắt đầu (fix BUG 3):
+
+- **State**: in-memory `Map<projectId:mrIid, InFlightReview>` — không persist.
+- **Flow**:
+  1. `performReview` bắt đầu → `registerReview(payload)` trả về `InFlightReview` chứa `AbortController`.
+  2. Nếu có entry cũ cho cùng MR IID → `abortController.abort()` → `runPiReview` listener → `session.abort()` → SDK reject → performReview catch → return không post note.
+  3. `runPiReview({ abortSignal })` — listener external abort (vs `REVIEW_TIMEOUT_MS` timeout, dùng chung `session.abort()`).
+  4. `performReview` `finally` → `completeReview()` clear entry để review kế tiếp không abort nhầm.
+- **Key là `projectId:mrIid`** — 2 MR khác nhau không cancel lẫn nhau (chỉ cùng MR mới cancel).
+- **Trade-off**: review cũ bị abort mất token đã dùng tới lúc abort (~1-2 phút), nhưng tránh được duplicate comment + race condition.
 
 ## Decisions log
 
@@ -205,6 +235,54 @@ Parse `.pi/config.yaml` từ cloned repo. Merge với default. Validate types (r
 - Bot failure → MR blocked cho đến khi fix bot (conservative, có thể override manual)
 - Approval gate chỉ kích hoạt nếu project setup Approval Rule (mặc định OFF)
 
+### D10: CI wait qua pipeline webhook + stateful Map in-memory
+
+**Chọn**: Khi project bật `ci.require: true`, bot đợi CI pass mới review. Implement bằng cách listen thêm pipeline webhook + stateful `Map<projectId:sha, payload>` in-memory.
+
+**Lý do**:
+- Tiết kiệm token AI — không review code mà CI sẽ catch lỗi (lint/typecheck/test fail)
+- Pipeline webhook event-driven, không polling → ít GitLab API call, không tốn slot semaphore khi chờ
+- Stateful Map đơn giản, không cần Redis — volume thấp (<50 MR/ngày)
+- SHA matching (không MR matching) → robust với re-push, chính xác commit đang review
+- Per-project timeout override qua `.pi/config.yaml` → monorepo CI chậm không bị cutoff
+- Aggregate TẤT CẢ pipeline cùng SHA → không miss fail của branch pipeline khi MR pipeline success (workflow GitLab chuẩn)
+- Secondary index `mrIid → sha` clear entry cũ khi re-push → tránh stale trigger
+
+**Alternatives đã loại**:
+- ❌ **Poll pipeline status** (setInterval 30s × 10 phút) — tốn GitLab API call, giữ slot semaphore khi chờ (3 MR chờ CI = block hết slot review)
+- ❌ **Redis persist pending** — thêm dependency ($10/mo), overkill cho MVP
+- ❌ **Job-level webhook** (build events) — quá chi tiết, chỉ cần pipeline aggregate status
+- ❌ **Block toàn server (default on)** — nguy hiểm cho project chưa setup CI
+- ❌ **Chỉ check `pipelines[0]`** — có thể miss fail pipeline khác cùng SHA (vd branch pipeline fail trong khi MR pipeline success)
+- ❌ **Track pending theo MR IID thay vì SHA** — không match được pipeline webhook với entry (pipeline webhook có SHA, không có MR IID)
+
+**Trade-off**:
+- Bot restart → pending CI wait mất (user push commit retry). Note trong Known Limitations.
+- Cần project enable thêm "Pipeline events" webhook (manual setup step)
+- Repo chưa setup CI → bot review anyway (lenient, không block team chưa có CI)
+- Parent-child pipeline (downstream, `trigger:` keyword) không tracked — chỉ check parent. Workaround: `needs:` trong CI config.
+
+### D11: Cancel review cũ qua AbortController khi push mới
+
+**Chọn**: Khi review mới bắt đầu cho cùng MR IID, abort review cũ đang chạy qua `AbortSignal` → `session.abort()`.
+
+**Lý do**:
+- Tránh 2 review song song trên cùng MR → duplicate comment, race condition approve/unapprove, sai SHA diff (GitLab reject inline comment với position hash mismatch)
+- `AbortSignal` là web standard, Pi SDK đã expose `session.abort()` (dùng cho REVIEW_TIMEOUT_MS) → reuse pattern
+- Key theo `projectId:mrIid` (không phải SHA) — 2 MR khác nhau không cancel lẫn nhau
+- Review cũ bị abort → SDK reject `agentEnded` → performReview catch → return KHÔNG post note (im lặng) → review mới sẽ lo toàn bộ verdict
+- Token đã dùng tới lúc abort (~1-2 phút phần lớn) bị mất, nhưng tránh được noise lớn hơn
+
+**Alternatives đã loại**:
+- ❌ **Skip webhook mới (1 review tại 1 thời điểm)** — user push 5 commit liên tiếp chỉ commit đầu được review, phải push commit rỗng để re-trigger
+- ❌ **Discard kết quả review cũ nếu SHA mismatch** — vẫn tốn token review cũ, vẫn có thể approvetool đã gọi GitLab API giữa chừng
+- ❌ **Queue review mới, đợi review cũ xong** — tăng latency, phức tạp hơn (cần queue per-MR)
+- ❌ **Track theo SHA thay vì MR IID** — không catch được case re-push với webhook duplicate (cùng SHA)
+
+**Trade-off**:
+- Abort xảy ra giữa chừng tool call (vd approve đã gọi GitLab API) → không rollback. Trade-off chấp nhận được — rare, review mới sẽ cover với verdict mới.
+- Bot restart → inflight lost → user push retry (cùng pattern CI wait + bot error).
+
 ## Risk register
 
 | Risk | Likelihood | Impact | Mitigation |
@@ -216,6 +294,12 @@ Parse `.pi/config.yaml` từ cloned repo. Merge với default. Validate types (r
 | Bot OOM trên MR lớn | Medium | High | Cap diff 200KB, maxFiles=100, post-MVP chunking |
 | Webhook secret leak | Low | Critical | Fly secrets encrypted, timing-safe compare |
 | Repo clone fail (private project, wrong token) | Low | High | Catch error, post error comment |
+| Bot restart mất pending CI wait | Low | Medium | User push commit retry (cùng pattern bot error) |
+| Project quên enable "Pipeline events" webhook | Medium | Low | Bot log warning + fallback review sau timeout |
+| Parent-child pipeline (downstream) không tracked | Low | Low | Document Known Limitation, workaround `needs:` |
+| Multi-pipeline race (branch fail + MR success) | Medium | Medium | Aggregate TẤT CẢ pipeline cùng SHA, require tất cả pass |
+| Review cũ bị abort giữa tool call (approve đã gọi) | Low | Low | Trade-off chấp nhận — review mới sẽ cover verdict |
+| Re-push khi đang review (race 2 review) | Medium | High | Cancel review cũ qua AbortController (D11) |
 
 ## Roadmap (post-MVP)
 
@@ -226,9 +310,10 @@ Parse `.pi/config.yaml` từ cloned repo. Merge với default. Validate types (r
 | 3 | Web UI dashboard (status, history, per-project config) | Medium | 1 week |
 | 4 | Multi-tenant: per-project GitLab token | Low | 1 week |
 | 5 | Auto-fix: bot commit fix vào MR | Low | 3-5 days |
-| 6 | Review status check (GitLab Pipeline Status API) | Low | 2 days |
+| 6 | ~~Review status check (GitLab Pipeline Status API)~~ ✅ Done — implemented as CI wait mode (D10) | Low | 2 days |
 | 7 | Slash command runtime (`@pi-bot rebase`) | Low | 1 week |
 | 8 | Multi-LLM routing (per-project chọn DeepSeek/Z.ai/OpenAI) | Low | 2 days |
+| 9 | Persist CI wait pending sang Redis/disk | Low | 1 day |
 
 ## Metrics (post-MVP)
 

@@ -28,14 +28,16 @@ pi-reviewer-bot/
 │   └── code-reviewer.md            # system prompt cho AI reviewer (10 tools)
 ├── src/
 │   ├── index.ts                    # Hono app entrypoint (POST /webhook, GET /healthz, /stats)
-│   ├── webhook.ts                  # verify token + filter + orchestrate review
-│   ├── gitlab.ts                   # GitLab API client (approve, comment, get_issue, ...)
+│   ├── webhook.ts                  # verify token + filter + orchestrate review + CI wait check
+│   ├── gitlab.ts                   # GitLab API client (approve, comment, get_issue, pipeline status, ...)
 │   ├── repo.ts                     # shallow clone source branch per-MR
 │   ├── pi.ts                       # Pi SDK wrapper — createAgentSession + subscribe
 │   ├── config.ts                   # .pi/config.yaml loader + defaults
+│   ├── ciwait.ts                   # CI wait coordinator (pending Map between MR + pipeline webhooks)
+│   ├── inflight.ts                 # in-flight review coordinator (cancel review cũ khi push mới — fix BUG 3)
 │   ├── stats.ts                    # per-project observability
 │   ├── limiter.ts                  # semaphore + rate limit
-│   ├── types.ts                    # webhook payload + types
+│   ├── types.ts                    # webhook payload + types (MR + Pipeline)
 │   └── tools/                      # 10 custom tools (defineTool)
 │       ├── index.ts                # tool factory + shared state
 │       ├── result.ts               # ok/err/done helpers (AgentToolResult shape)
@@ -159,6 +161,10 @@ scope:
 block:
   enabled: true                    # block merge cho đến khi bot approve
 
+ci:
+  require: true                    # bật CI wait mode — đợi CI pass mới review (cần enable Pipeline events webhook)
+  waitTimeoutMs: 900000            # timeout per-project (ms) — optional, default = env CI_WAIT_TIMEOUT_MS
+
 llm:
   model: zai/glm-5.2               # override default (có thể dùng openai/gpt-4o, ...)
 ```
@@ -178,6 +184,8 @@ Xem [`docs/CONFIG.md`](docs/CONFIG.md) cho schema đầy đủ.
 | D7 | Approval gate qua GitLab API | Block merge, auto-reset on push |
 | D8 | Multi-provider (không hardcode Z.ai) | Pi SDK hỗ trợ 40+ providers, user tự chọn |
 | D9 | Flatten repo (không bot/ subdir) | Đơn giản, source là project chính |
+| D10 | CI wait qua pipeline webhook + stateful Map in-memory | Event-driven (không polling), không giữ slot semaphore khi chờ, per-project timeout override |
+| D11 | Cancel review cũ qua AbortController khi push mới | Tránh 2 review song song (race condition, duplicate comment, sai SHA diff) |
 
 Xem [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) cho decision chi tiết.
 
@@ -188,6 +196,8 @@ Xem [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) cho decision chi tiết.
 - ❌ Web UI dashboard
 - ❌ OpenTelemetry export
 - ❌ Auto-fix commits
+- ❌ Pending CI wait mất khi bot restart (in-memory, không persist — user push commit retry)
+- ❌ Parent-child pipelines (downstream, `trigger:` keyword) không tracked — bot chỉ check parent pipeline status. Workaround: dùng `needs:` trong CI config để parent đợi child xong
 
 ## Useful Commands
 

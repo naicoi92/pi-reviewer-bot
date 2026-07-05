@@ -8,10 +8,12 @@
  */
 
 import { Hono } from "hono";
+import { consumePendingReview, pendingCount } from "./ciwait.ts";
+import { inflightCount } from "./inflight.ts";
 import { performReview, shouldReview, verifyToken } from "./webhook.ts";
 import { globalSemaphore } from "./limiter.ts";
 import { stats } from "./stats.ts";
-import type { AnyGitLabWebhook, MergeRequestWebhook } from "./types.ts";
+import type { AnyGitLabWebhook, MergeRequestWebhook, PipelineWebhook } from "./types.ts";
 
 const app = new Hono();
 const PORT = Number(process.env.PORT ?? 3000);
@@ -40,6 +42,8 @@ app.get("/healthz", (c) =>
     version: VERSION,
     uptime: process.uptime(),
     reviewsInFlight: globalSemaphore.current,
+    reviewsActive: inflightCount(),
+    ciWaitPending: pendingCount(),
   }),
 );
 
@@ -67,6 +71,10 @@ app.get("/stats", (c) => {
       active: globalSemaphore.current,
       max: Number(process.env.MAX_CONCURRENT_REVIEWS ?? 3),
     },
+    reviewsActive: inflightCount(),
+    ciWait: {
+      pending: pendingCount(),
+    },
   });
 });
 
@@ -78,8 +86,41 @@ app.post("/webhook", async (c) => {
     return c.json({ error: "invalid or missing X-Gitlab-Token" }, 401);
   }
 
-  // 2. Parse + filter object_kind
+  // 2. Parse payload
   const raw = (await c.req.json()) as AnyGitLabWebhook;
+
+  // ─── Pipeline webhook — trigger deferred review khi CI pass ───
+  // Chỉ interested khi status=success (CI fail đã được xử lý ở MR webhook phase).
+  if (raw.object_kind === "pipeline") {
+    const pipeline = raw as unknown as PipelineWebhook;
+    const attrs = pipeline.object_attributes;
+    const status = attrs?.status;
+    const projectId = attrs?.project_id;
+    const sha = attrs?.sha;
+
+    if (status !== "success") {
+      return c.json({ skipped: true, reason: `pipeline-status=${status}` });
+    }
+    if (!projectId || !sha) {
+      return c.json({ skipped: true, reason: "pipeline-missing-project-id-or-sha" });
+    }
+
+    // Lookup pending review (đăng ký khi MR webhook đến + CI đang chạy).
+    const entry = consumePendingReview(projectId, sha);
+    if (!entry) {
+      // Không có pending — skip idempotent (MR đã review rồi, hoặc ci.require=false).
+      return c.json({ skipped: true, reason: "no-pending-review" });
+    }
+
+    console.log(`[webhook] pipeline success ${projectId}@${sha.slice(0, 8)} — triggering deferred review for !${entry.payload.object_attributes.iid}`);
+    // Trigger review với skipCiCheck=true (CI đã pass, không check lại).
+    performReview(entry.payload, { skipCiCheck: true }).catch((err) => {
+      console.error(`[webhook] uncaught deferred review error:`, err);
+    });
+    return c.json({ accepted: true, triggeredBy: "pipeline", sha });
+  }
+
+  // ─── Merge request webhook — flow chính ───
   if (raw.object_kind !== "merge_request") {
     return c.json({ skipped: true, reason: `object_kind=${raw.object_kind}` });
   }
@@ -99,6 +140,7 @@ app.post("/webhook", async (c) => {
     scope: { enabled: false },
     llm: {},
     block: { enabled: false },
+    ci: { require: false },
   });
 
   if (!decision.review) {

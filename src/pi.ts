@@ -128,6 +128,15 @@ export async function runPiReview(opts: {
   diffEntries: MergeRequestDiffEntry[];
   /** "provider/model" e.g. "zai/glm-5.2". Override from .pi/config.yaml. */
   model?: string;
+  /**
+   * External abort signal — fire khi review mới đến (push commit mới) hoặc
+   * bot shutdown. Khi fire: `session.abort()` → SDK reject `agentEnded` →
+   * caller catch AbortError → return không post note.
+   *
+   * Tách riêng với REVIEW_TIMEOUT_MS timeout (cũng gọi session.abort() nhưng
+   * với lý do khác). Cả 2 nguồn dùng chung cơ chế abort SDK.
+   */
+  abortSignal?: AbortSignal;
 }): Promise<PiReviewResult> {
   const startedAt = Date.now();
   const modelId = opts.model || DEFAULT_MODEL;  // empty string falls through to Pi default
@@ -237,6 +246,27 @@ export async function runPiReview(opts: {
     rejectAgentEnd(new Error(msg));
   }, REVIEW_TIMEOUT_MS);
 
+  // External abort (vd push commit mới → registerReview abort review cũ).
+  // Dùng cùng cơ chế session.abort() như timeout, nhưng lý do khác để log rõ.
+  let externalAbortListener: (() => void) | undefined;
+  if (opts.abortSignal) {
+    if (opts.abortSignal.aborted) {
+      // Edge case: signal đã abort trước khi listener attach (race).
+      const msg = "review aborted (superseded by newer push)";
+      console.log(`[pi] ${msg}`);
+      session.abort().catch(() => void 0);
+      rejectAgentEnd(new Error(msg));
+    } else {
+      externalAbortListener = () => {
+        const msg = "review aborted (superseded by newer push)";
+        console.log(`[pi] ${msg}`);
+        session.abort().catch(() => void 0);
+        rejectAgentEnd(new Error(msg));
+      };
+      opts.abortSignal.addEventListener("abort", externalAbortListener, { once: true });
+    }
+  }
+
   const prompt = buildPrompt({ ctx: opts.ctx, diffEntries: opts.diffEntries });
 
   try {
@@ -250,6 +280,9 @@ export async function runPiReview(opts: {
     agentError = err instanceof Error ? err.message : String(err);
   } finally {
     clearTimeout(timeoutHandle);
+    if (externalAbortListener && opts.abortSignal) {
+      opts.abortSignal.removeEventListener("abort", externalAbortListener);
+    }
     unsubscribe();
     session.dispose();
   }
