@@ -12,11 +12,12 @@ Bot hỗ trợ **bất kỳ LLM provider nào** Pi hỗ trợ (40+): Z.ai GLM, O
 
 | Doc | Audience | Purpose |
 |---|---|---|
-| **[📖 Deploy Guide](docs/SETUP.md)** | Dev ops / SRE | Build image, run container (Docker/K8s/systemd), expose webhook |
-| **[📖 Integration Guide](docs/INTEGRATION.md)** | AI agent / project owner | Setup bot cho project GitLab của bạn (`.pi/config.yaml`, agent prompt, webhook) |
-| **[📖 Config Schema](docs/CONFIG.md)** | Project owner | `.pi/config.yaml` full schema + examples |
-| **[📖 Architecture](docs/ARCHITECTURE.md)** | Maintainer | Design decisions, decision log (D1-D9) |
-| **[📖 Multi-project Ops](docs/MULTIPROJECT.md)** | Ops | Vận hành bot cho nhiều project |
+| **[📖 Deploy Guide](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SETUP.md)** | Dev ops / SRE | Build image, run container (Docker/K8s/systemd), expose webhook |
+| **[📖 Integration Guide](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/INTEGRATION.md)** | AI agent / project owner | Setup bot cho project GitLab của bạn (`.pi/config.yaml`, agent prompt, webhook) |
+| **[📖 Skills](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SKILLS.md)** | Developer / AI agent ở project đã setup bot | Luồng công việc hàng ngày với bot: tạo MR, đợi review, đọc comment, xử lý feedback, re-trigger khi cần |
+| **[📖 Config Schema](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md)** | Project owner | `.pi/config.yaml` full schema + examples |
+| **[📖 Architecture](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/ARCHITECTURE.md)** | Maintainer | Design decisions, decision log (D1-D11) |
+| **[📖 Multi-project Ops](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/MULTIPROJECT.md)** | Ops | Vận hành bot cho nhiều project |
 
 ---
 
@@ -68,7 +69,7 @@ Expose public URL để GitLab gọi webhook:
 - **VPS không public IP**: Cloudflare Tunnel → free HTTPS
 - **Local dev**: localtunnel / ngrok
 
-📖 **Chi tiết đầy đủ**: [docs/SETUP.md](docs/SETUP.md) — gồm K8s manifest, systemd unit, troubleshooting.
+📖 **Chi tiết đầy đủ**: [docs/SETUP.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/SETUP.md) — gồm K8s manifest, systemd unit, troubleshooting.
 
 ---
 
@@ -91,6 +92,10 @@ scope:
 
 block:
   enabled: true                             # block merge cho đến khi bot approve
+
+# ci:
+#   require: true                           # bật nếu muốn bot đợi CI pass mới review
+#   waitTimeoutMs: 900000                   # timeout per-project (default = env CI_WAIT_TIMEOUT_MS)
 
 llm:
   model: zai/glm-5.2                        # override (mặc định = bot DEFAULT_MODEL)
@@ -117,11 +122,12 @@ Project → Settings → Webhook
   URL: https://pi-bot.yourdomain.com/webhook
   Secret token: <WEBHOOK_SECRET>      ← cùng giá trị set trong bot .env
   Trigger: ✅ Merge request events
+           ✅ Pipeline events          ← CHỈ khi dùng ci.require: true
 ```
 
 **Xong.** Mở MR → bot auto-review trong ~30s-3 phút.
 
-📖 **Chi tiết đầy đủ**: [docs/INTEGRATION.md](docs/INTEGRATION.md) — gồm template cho solo dev, monorepo, docs-only project, troubleshooting.
+📖 **Chi tiết đầy đủ**: [docs/INTEGRATION.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/INTEGRATION.md) — gồm template cho solo dev, monorepo, docs-only project, troubleshooting.
 
 ---
 
@@ -142,10 +148,11 @@ Guardrail: `approve_mr` block nếu chưa `post_summary` hoặc còn critical un
 - ✅ **10 tools** — AI có tools để fetch context, post inline comments, approve, request changes
 - ✅ **Inline line comments** — DiffNote qua GitLab Discussions API với position hash
 - ✅ **Merge gate** — block MR cho đến khi bot approve (`block.enabled: true` + GitLab Approval Rule)
+- ✅ **CI wait mode** — bot đợi CI pass mới review (`ci.require: true` + GitLab Pipeline events webhook) — tiết kiệm token, tránh review code mà CI sẽ catch lỗi
 - ✅ **Multi-project** — 1 bot instance phục vụ mọi GitLab project qua `.pi/config.yaml`
-- ✅ **Per-project config** — mỗi project customize language, scope rules, model
+- ✅ **Per-project config** — mỗi project customize language, scope rules, model, CI wait timeout
 - ✅ **Concurrency + rate limit** — global semaphore + per-project cooldown
-- ✅ **`/stats` endpoint** — observability per-project
+- ✅ **`/stats` endpoint** — observability per-project + CI wait pending count
 - ✅ **Guardrail chống hallucinate approve** — phải post_summary trước + 0 critical unresolved
 - ✅ **Fail-safe** — bot unapprove nếu AI crash trước khi gọi verdict tool
 
@@ -161,10 +168,12 @@ pi-reviewer-bot/
 ├── src/
 │   ├── index.ts                # Hono app: POST /webhook, GET /healthz, /stats
 │   ├── webhook.ts              # Verify token + filter + orchestrate review
-│   ├── gitlab.ts               # GitLab API client (approve, comment, get_issue, ...)
+│   ├── gitlab.ts               # GitLab API client (approve, comment, get_issue, pipeline status, ...)
 │   ├── repo.ts                 # Shallow clone source branch per-MR
 │   ├── pi.ts                   # Pi SDK wrapper — createAgentSession + subscribe
 │   ├── config.ts               # .pi/config.yaml loader
+│   ├── ciwait.ts               # CI wait coordinator (pending Map between MR + pipeline webhooks)
+│   ├── inflight.ts             # In-flight review coordinator (cancel old review on new push)
 │   ├── stats.ts                # Per-project observability
 │   ├── limiter.ts              # Semaphore + rate limit
 │   ├── types.ts                # Webhook payload types

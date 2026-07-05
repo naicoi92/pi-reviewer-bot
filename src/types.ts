@@ -13,6 +13,91 @@ export type GitLabEventKind =
   | "build"
   | string;
 
+// ─── Pipeline (CI) ───────────────────────────────────────────
+// Used by CI wait mode — bot listens for pipeline webhooks to know when CI
+// finishes, then triggers deferred review. Docs:
+// https://docs.gitlab.com/ee/user/project/integrations/webhook_events.html#pipeline-events
+
+/**
+ * Trạng thái pipeline theo GitLab API.
+ *
+ * Phân loại cho CI wait logic (xem `src/webhook.ts:performReview`):
+ * - `RUNNING_STATES` (running|pending|created|waiting_for_resource|preparing|
+ *   scheduled|manual|new): CI chưa xong → bot enqueue đợi.
+ * - `SUCCESS` (`success`): CI pass → review luôn.
+ * - `FAILURE_STATES` (failed|canceled|skipped): CI fail → skip review + note.
+ */
+export type PipelineStatus =
+  | "created"
+  | "waiting_for_resource"
+  | "preparing"
+  | "pending"
+  | "running"
+  | "success"
+  | "failed"
+  | "canceled"
+  | "skipped"
+  | "manual"
+  | "scheduled"
+  | "new";
+
+/** Tập status coi như "CI đang chạy" — bot sẽ đợi. */
+export const PIPELINE_RUNNING_STATES = new Set<PipelineStatus>([
+  "created",
+  "waiting_for_resource",
+  "preparing",
+  "pending",
+  "running",
+  "scheduled",
+]);
+
+/** Tập status coi như "CI fail" — bot skip review + post note. */
+export const PIPELINE_FAILURE_STATES = new Set<PipelineStatus>([
+  "failed",
+  "canceled",
+  "skipped",
+]);
+
+export interface PipelineObjectAttributes {
+  id: number;
+  ref: string;
+  /** Status of the pipeline at the moment webhook fired. */
+  status: PipelineStatus;
+  /** Commit SHA the pipeline ran against. */
+  sha: string;
+  /** "branch" | "tag" — usually branch cho MR pipeline. */
+  source?: string;
+  /** Project ID pipeline belongs to. */
+  project_id: number;
+}
+
+export interface PipelineWebhook {
+  object_kind: "pipeline";
+  event_type: "pipeline";
+  user: GitLabUser;
+  project: GitLabProject;
+  /** Commit metadata pipeline ran on. */
+  commit: { id: string; message: string; timestamp: string };
+  object_attributes: PipelineObjectAttributes;
+  /** MRs attached to this pipeline (present khi pipeline trigger từ MR push). */
+  merge_request?: {
+    id: number;
+    iid: number;
+    source_branch: string;
+    target_branch: string;
+    source_project_id: number;
+    target_project_id: number;
+    state: MergeRequestState;
+  };
+  builds: Array<{
+    id: number;
+    stage: string;
+    name: string;
+    status: PipelineStatus;
+    created_at: string;
+  }>;
+}
+
 export interface GitLabUser {
   id: number;
   name: string;

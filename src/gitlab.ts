@@ -14,10 +14,15 @@
  */
 
 import { Gitlab } from "@gitbeaker/rest";
+import {
+  PIPELINE_FAILURE_STATES,
+  PIPELINE_RUNNING_STATES,
+} from "./types.ts";
 import type {
   MergeRequestDiffEntry,
   MergeRequestObjectAttributes,
   MergeRequestWebhook,
+  PipelineStatus,
 } from "./types.ts";
 
 const API_TOKEN = process.env.GITLAB_API_TOKEN ?? "";
@@ -404,4 +409,120 @@ export async function getWikiPage(
   }
   const data = (await res.json()) as WikiPage;
   return { ok: true, page: data };
+}
+
+// ─── CI pipeline (cho CI wait mode) ──────────────────────────
+// Bot có thể đợi CI pass trước khi review (cfg.ci.require=true).
+// Hàm này lấy status pipeline mới nhất cho MR — dùng cho 2 mục đích:
+//   1. Khi MR webhook đến → check xem CI đang chạy hay đã xong.
+//   2. Khi pipeline webhook đến (status=success) → trigger pending review.
+// Docs: https://docs.gitlab.com/api/merge_requests/#list-merge-request-pipelines
+
+export interface MrPipelineEntry {
+  id: number;
+  sha: string;
+  ref: string;
+  status: PipelineStatus;
+  /** "merged" | "pending" | "running" | ... — GitLab dùng 1 số field khác nhau cho "trạng thái tổng" */
+  detailed_status?: unknown;
+  /** "push" | "merge_request_event" | "scheduled" | "trigger" | ... —GitLab có thể chạy nhiều pipeline cho cùng push. */
+  source?: string;
+  created_at: string;
+  updated_at: string;
+  web_url: string;
+}
+
+/**
+ * Aggregate trạng thái TẤT CẢ pipeline cùng SHA thành 1 status tổng.
+ *
+ * Pure function (không gọi API) — tách ra để test độc lập, không cần mock fetch.
+ *
+ * Rules:
+ *   - Bất kỳ pipeline nào running/pending → "running" (bot phải đợi tất cả).
+ *   - Tất cả success (hoặc manual) → "success".
+ *   - Có failure + không còn running → failure status đó.
+ *
+ * Fix BUG 2: trước đây bot chỉ check `pipelines[0]` → miss fail của pipeline
+ * khác cùng SHA (vd branch pipeline fail trong khi MR pipeline success).
+ */
+export function aggregatePipelineStatus(
+  pipelines: MrPipelineEntry[],
+): { hasPipeline: true; status: PipelineStatus; sha: string } | { hasPipeline: false } {
+  if (pipelines.length === 0) return { hasPipeline: false };
+
+  let anyRunning = false;
+  let anyFailure: PipelineStatus | undefined;
+  let allSuccess = true;
+  let lastSha = "";
+
+  for (const p of pipelines) {
+    if (!p.status) continue;
+    lastSha = p.sha;
+    if (PIPELINE_RUNNING_STATES.has(p.status)) {
+      anyRunning = true;
+      allSuccess = false;
+    } else if (PIPELINE_FAILURE_STATES.has(p.status)) {
+      anyFailure = p.status;
+      allSuccess = false;
+    } else if (p.status !== "success" && p.status !== "manual") {
+      // Status khác (vd skipped trong workflow rules) — coi không success.
+      allSuccess = false;
+    }
+  }
+
+  if (anyRunning) {
+    return { hasPipeline: true, status: "running", sha: lastSha };
+  }
+  if (allSuccess) {
+    return { hasPipeline: true, status: "success", sha: lastSha };
+  }
+  if (anyFailure) {
+    return { hasPipeline: true, status: anyFailure, sha: lastSha };
+  }
+  // Edge case: toàn "manual" hoặc không status rõ → coi như success.
+  return { hasPipeline: true, status: "success", sha: lastSha };
+}
+
+/**
+ * Tổng hợp trạng thái CI cho commit đang review.
+ *
+ * **Quan trọng (fix BUG 2)**: GitLab có thể chạy **nhiều pipeline song song**
+ * cho cùng 1 push — vd 1 branch pipeline (`source=push`) + 1 MR pipeline
+ * (`source=merge_request_event`). Logic cũ chỉ check `pipelines[0]` → có thể
+ * miss fail của pipeline kia.
+ *
+ * Logic:
+ *   1. Lọc pipelines theo SHA = source SHA của MR (chỉ quan tâm commit đang review).
+ *   2. Aggregate qua `aggregatePipelineStatus`.
+ *
+ * Trường hợp lỗi API (403/500/...) trả `{ hasPipeline: false, error }` — caller
+ * tự decide (default: review anyway, lenient).
+ */
+export async function getMrPipelineStatus(
+  ctx: MrContext,
+): Promise<
+  | { hasPipeline: true; status: PipelineStatus; sha: string }
+  | { hasPipeline: false; error?: string }
+> {
+  try {
+    const url = `${API_BASE}/projects/${ctx.projectId}/merge_requests/${ctx.mrIid}/pipelines`;
+    const res = await fetch(url, { headers: authHeaders() });
+    if (!res.ok) {
+      // 404 thường gặp khi project chưa setup .gitlab-ci.yml → coi như "no pipeline"
+      return { hasPipeline: false, error: `${res.status}` };
+    }
+    const all = (await res.json()) as MrPipelineEntry[];
+    if (!Array.isArray(all) || all.length === 0) {
+      return { hasPipeline: false };
+    }
+
+    // Chỉ xét pipelines cho commit đang review (source SHA).
+    // GitLab list có thể bao gồm pipelines của commit cũ (vd sau rebase).
+    const targetSha = ctx.sourceSha;
+    const relevant = targetSha ? all.filter((p) => p.sha === targetSha) : all;
+
+    return aggregatePipelineStatus(relevant);
+  } catch (e) {
+    return { hasPipeline: false, error: e instanceof Error ? e.message : String(e) };
+  }
 }

@@ -3,7 +3,7 @@
 > **Audience**: Dev ops / SRE / self-hoster — người **deploy bot service**.
 >
 > Nếu bạn muốn **dùng bot cho project GitLab của mình** (không phải deploy),
-> xem [INTEGRATION.md](INTEGRATION.md) thay vì doc này.
+> xem [INTEGRATION.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/INTEGRATION.md) thay vì doc này.
 
 Bot webhook service nhận GitLab MR events → spawn Pi Coding Agent review với LLM
 bất kỳ (Z.ai GLM, OpenAI GPT, Anthropic Claude, ...) → post comments + approve/request_changes.
@@ -246,13 +246,16 @@ GitLab project → Settings → Webhook
 |---|---|
 | **URL** | `https://pi-bot.yourdomain.com/webhook` |
 | **Secret token** | `<WEBHOOK_SECRET từ .env>` |
-| **Trigger** | ✅ **Merge request events** (bỏ các option khác) |
+| **Trigger** | ✅ **Merge request events** (bắt buộc) |
+|  | ✅ **Pipeline events** (chỉ khi project dùng `ci.require: true` — CI wait mode) |
 | **SSL verification** | ✅ Enable |
 | **Enable SSL verification** | ✅ |
 
 Click **Add webhook**. Cuộn xuống webhook vừa tạo → **Test → Merge request events**.
 
 Verify bot nhận được (check `docker logs pi-reviewer-bot | grep "webhook"`).
+
+> ℹ️ "Pipeline events" chỉ cần khi project bật `ci.require: true` trong `.pi/config.yaml` (xem section 6). Bình thường chỉ cần "Merge request events".
 
 ---
 
@@ -272,9 +275,15 @@ scope:
 
 block:
   enabled: true  # block merge cho đến khi bot approve
+
+# ci:
+#   require: true           # bật CI wait mode — bot đợi CI pass mới review
+#   waitTimeoutMs: 900000   # timeout per-project (ms), default = env CI_WAIT_TIMEOUT_MS
 ```
 
 Commit + push. Bot tự load ở lần review tiếp theo (clone source branch).
+
+> ℹ️ Khi bật `ci.require: true`, **phải enable thêm "Pipeline events" webhook** (xem section 5). Chi tiết: [`docs/CONFIG.md#ci-integration`](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md#ci-integration).
 
 ---
 
@@ -331,10 +340,16 @@ Mỗi review log:
 [review !42] start — group/project @ feat/login
 [review !42] acquired review slot
 [review !42] cloned to /tmp/pi-reviews/... (config: true)
+[review !42] ci: pipeline running — enqueued, will review on pipeline success (timeout 600000ms)   ← chỉ khi ci.require=true
 [review !42] fetched 8 file diffs
 [review !42] pi finished in 48200ms — ok=true events=12
 [review !42] tool state: summary=true inline=3 critical=0 approved=true changesRequested=false
 [review !42] done — outcome=approved duration=51200ms
+```
+
+Pipeline webhook trigger (chỉ khi ci.require=true):
+```
+[webhook] pipeline success 100@abc12345 — triggering deferred review for !42
 ```
 
 ### Stats endpoint
@@ -415,6 +430,26 @@ REVIEW_TIMEOUT_MS=600000  # 10 phút
 docker compose up -d
 ```
 
+### Review bị skip vì CI fail (CI wait mode)
+
+Khi project bật `ci.require: true` và CI fail, bot post note "🚫 CI failed" và skip review. Log:
+
+```
+[review !42] ci: pipeline failed — skip review (CI failed)
+```
+
+Fix: fix CI ở source branch rồi push commit mới → bot re-check pipeline status.
+
+### Bot không review dù CI pass
+
+Có 3 nguyên nhân thường gặp:
+
+1. **"Pipeline events" webhook chưa enable** — bot enqueue pending nhưng không nhận signal CI finish. Check `Project → Webhook → Trigger` có tick ✅ Pipeline events không.
+2. **`ci.require: false` (chưa bật)** — bot review ngay khi MR webhook đến, không đợi CI. Set `ci.require: true` trong `.pi/config.yaml`.
+3. **Bot restart giữa lúc đang đợi** — pending lost (in-memory). Push commit để retry.
+
+Để debug, check `/stats` endpoint — field `ciWait.pending` cho biết bao nhiêu review đang đợi CI.
+
 ### OOM crash
 
 ```bash
@@ -440,6 +475,6 @@ docker compose down  # stop container
 
 - [Pi Coding Agent](https://pi.dev/docs/)
 - [Z.ai Coding Plan](https://z.ai/subscribe)
-- [Project config schema](CONFIG.md)
-- [Architecture](ARCHITECTURE.md)
-- [Multi-project ops](MULTIPROJECT.md)
+- [Project config schema](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md)
+- [Architecture](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/ARCHITECTURE.md)
+- [Multi-project ops](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/MULTIPROJECT.md)

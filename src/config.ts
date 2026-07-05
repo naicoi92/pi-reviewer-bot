@@ -45,11 +45,32 @@ export interface BlockConfig {
   enabled: boolean;
 }
 
+export interface CiConfig {
+  /**
+   * When true, bot waits for CI pipeline to pass before reviewing.
+   * - MR webhook đến + CI running → enqueue pending, đợi pipeline webhook.
+   * - Pipeline webhook `status=success` → trigger deferred review.
+   * - CI fail → skip review + post note.
+   *
+   * Requires GitLab project to enable "Pipeline events" webhook (ngoài MR events).
+   * Default: false (review ngay khi MR webhook đến — backward compatible).
+   */
+  require: boolean;
+  /**
+   * Timeout đợi CI (ms). Nếu CI chạy lâu hơn, bot proceed review anyway + log.
+   * Default: lấy từ env `CI_WAIT_TIMEOUT_MS` (server-wide, default 600000 = 10 phút).
+   * Override per-project tại đây (vd E2E chậm → 1_800_000 = 30 phút).
+   * `undefined` → resolve at runtime qua env fallback chain.
+   */
+  waitTimeoutMs?: number;
+}
+
 export interface ProjectConfig {
   review: ReviewConfig;
   scope: ScopeConfig;
   llm: LlmConfig;
   block: BlockConfig;
+  ci: CiConfig;
 }
 
 export const DEFAULT_CONFIG: ProjectConfig = {
@@ -68,6 +89,10 @@ export const DEFAULT_CONFIG: ProjectConfig = {
   // Default: blocking OFF. Project must opt-in via .pi/config.yaml
   // AND set up the Approval Rule in GitLab project settings.
   block: { enabled: false },
+  // Default: CI wait OFF. Project opt-in via .pi/config.yaml.
+  // Khi bật, project phải enable thêm "Pipeline events" webhook trên GitLab
+  // (ngoài "Merge request events") để bot nhận được signal CI finish.
+  ci: { require: false },
 };
 
 /**
@@ -103,6 +128,15 @@ export function mergeConfig(user: unknown): ProjectConfig {
   if (u.block && typeof u.block === "object") {
     const b = u.block as Record<string, unknown>;
     if (typeof b.enabled === "boolean") cfg.block.enabled = b.enabled;
+  }
+
+  if (u.ci && typeof u.ci === "object") {
+    const c = u.ci as Record<string, unknown>;
+    if (typeof c.require === "boolean") cfg.ci.require = c.require;
+    // Validate waitTimeoutMs: phải là số nguyên dương. Reject NaN/âm/float.
+    if (typeof c.waitTimeoutMs === "number" && Number.isFinite(c.waitTimeoutMs) && c.waitTimeoutMs > 0) {
+      cfg.ci.waitTimeoutMs = Math.floor(c.waitTimeoutMs);
+    }
   }
 
   return cfg;

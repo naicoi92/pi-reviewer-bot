@@ -16,20 +16,47 @@
 import { timingSafeEqual } from "node:crypto";
 import { DEFAULT_CONFIG, mergeConfig, type ProjectConfig } from "./config.ts";
 import {
+  enqueuePendingReview,
+} from "./ciwait.ts";
+import {
   fetchMrDiff,
+  getMrPipelineStatus,
+  listMrComments,
   mrContextFromWebhook,
   postMrNote,
   unapproveMr,
+  type MrContext,
 } from "./gitlab.ts";
+import { completeReview, registerReview, type InFlightReview } from "./inflight.ts";
 import { withLimits } from "./limiter.ts";
 import { runPiReview } from "./pi.ts";
 import { cloneForReview, readFileOrNull, type ClonedRepo } from "./repo.ts";
 import { stats, type ReviewOutcome } from "./stats.ts";
-import type { MergeRequestWebhook } from "./types.ts";
+import { PIPELINE_FAILURE_STATES, PIPELINE_RUNNING_STATES, type MergeRequestWebhook } from "./types.ts";
 import { parse } from "yaml";
 
 if (!process.env.WEBHOOK_SECRET) {
   console.warn("[webhook] WEBHOOK_SECRET not set — verification will fail open in dev only");
+}
+
+/** Hard fallback nếu env không set. 10 phút — đủ cho đa số CI pipeline. */
+const DEFAULT_CI_WAIT_TIMEOUT_MS = 600_000;
+
+/**
+ * Resolve timeout đợi CI theo priority:
+ *   1. `.pi/config.yaml` → `ci.waitTimeoutMs` (per-project)
+ *   2. Env `CI_WAIT_TIMEOUT_MS` (server-wide default)
+ *   3. Hardcoded `DEFAULT_CI_WAIT_TIMEOUT_MS` (10 phút)
+ */
+export function resolveCiWaitTimeoutMs(cfg: ProjectConfig): number {
+  if (cfg.ci.waitTimeoutMs && cfg.ci.waitTimeoutMs > 0) {
+    return cfg.ci.waitTimeoutMs;
+  }
+  const env = Number(process.env.CI_WAIT_TIMEOUT_MS);
+  if (Number.isFinite(env) && env > 0) {
+    return Math.floor(env);
+  }
+  return DEFAULT_CI_WAIT_TIMEOUT_MS;
 }
 
 /** Filter result returned synchronously to GitLab. */
@@ -108,11 +135,22 @@ export function shouldReview(
  * Pi SDK drives the review: AI calls tools (post_inline_comment, post_summary,
  * approve_mr/request_changes) directly. Bot chỉ post-check fail-safe:
  * nếu AI không gọi approve_mr (crash/timeout) → bot unapprove.
+ *
+ * @param payload  Webhook payload gốc.
+ * @param opts.skipCiCheck  Bỏ qua CI check — dùng khi trigger từ pipeline webhook
+ *                          (lúc đó CI đã pass, không cần check lại). Default false.
  */
-export async function performReview(payload: MergeRequestWebhook): Promise<void> {
+export async function performReview(
+  payload: MergeRequestWebhook,
+  opts: { skipCiCheck?: boolean } = {},
+): Promise<void> {
   const ctx = mrContextFromWebhook(payload);
   const log = (msg: string) => console.log(`[review !${ctx.mrIid}] ${msg}`);
   log(`start — ${ctx.projectPath} @ ${ctx.sourceBranch}`);
+
+  // BUG 3 fix: register review mới — nếu có review cũ cho cùng MR IID đang chạy,
+  // abort nó (session.abort() qua AbortSignal). Tránh 2 review song song.
+  const inflight: InFlightReview = registerReview(payload);
 
   let repo: ClonedRepo | undefined;
   let cfg: ProjectConfig = structuredClone(DEFAULT_CONFIG);
@@ -134,11 +172,32 @@ export async function performReview(payload: MergeRequestWebhook): Promise<void>
         if (raw) {
           try {
             cfg = mergeConfig(parse(raw));
-            log(`loaded config — language=${cfg.review.language} block=${cfg.block.enabled}`);
+            log(`loaded config — language=${cfg.review.language} block=${cfg.block.enabled} ci=${cfg.ci.require}`);
           } catch (err) {
             log(`warn — config parse failed: ${err}; using defaults`);
           }
         }
+      }
+
+      // ─── CI wait mode ────────────────────────────────────────
+      // Khi `ci.require: true`, check pipeline status trước khi review:
+      //   - CI running → enqueue pending, đợi pipeline webhook, return.
+      //   - CI failed/canceled/skipped → skip + post note (+ unapprove nếu block).
+      //   - CI pass hoặc repo chưa setup CI → proceed review.
+      // `skipCiCheck=true` (từ pipeline webhook trigger) → bỏ qua block này.
+      if (cfg.ci.require && !opts.skipCiCheck) {
+        const ciAction = await checkCiAndWait(payload, cfg, log);
+        if (ciAction === "deferred") {
+          // Đã enqueue, bot sẽ review khi pipeline webhook đến.
+          outcome = "skipped";
+          return;
+        }
+        if (ciAction === "skipped") {
+          // CI fail (hoặc bị skip do config) → không review, đã post note.
+          outcome = "skipped";
+          return;
+        }
+        // ciAction === "proceed" → fall through review như bình thường.
       }
 
       // Fetch diff
@@ -157,6 +216,7 @@ export async function performReview(payload: MergeRequestWebhook): Promise<void>
         repoDir: repo.dir,
         diffEntries,
         model: cfg.llm.model,
+        abortSignal: inflight.abortController.signal,
       });
       log(`pi finished in ${result.durationMs}ms — ok=${result.ok} events=${result.eventCount}`);
 
@@ -204,6 +264,15 @@ export async function performReview(payload: MergeRequestWebhook): Promise<void>
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+
+    // BUG 3 fix: review bị abort do push commit mới (review mới đã thay thế).
+    // KHÔNG post note, KHÔNG unapprove — review mới sẽ lo cả 2.
+    if (inflight.abortController.signal.aborted || /aborted/i.test(msg)) {
+      log(`cancelled — superseded by newer push, skipping outcome`);
+      outcome = "skipped";
+      return;
+    }
+
     console.error(`[review !${ctx.mrIid}] error:`, msg);
     outcome = "error";
     await postMrNote(
@@ -215,6 +284,8 @@ export async function performReview(payload: MergeRequestWebhook): Promise<void>
       console.log(`[review !${ctx.mrIid}] unapproved after error (block=true)`);
     }
   } finally {
+    // Clear inflight entry để review kế tiếp (cùng MR) không bị abort nhầm.
+    completeReview(ctx.projectId, ctx.mrIid);
     await repo?.cleanup();
     const durationMs = Date.now() - startedAt;
     stats.record({
@@ -225,4 +296,103 @@ export async function performReview(payload: MergeRequestWebhook): Promise<void>
     });
     log(`done — outcome=${outcome} duration=${durationMs}ms`);
   }
+}
+
+// ─── CI wait helpers ─────────────────────────────────────────
+
+/** Marker string trong note body để nhận diện note "⏸ Đợi CI" cho dedup. */
+const CI_WAIT_NOTE_MARKER = "⏸ Đợi CI pass";
+
+/**
+ * Check xem bot đã post note "⏸ Đợi CI" cho cùng SHA chưa.
+ * Tránh duplicate note khi dev push liên tiếp trong lúc CI đang chạy.
+ *
+ * Match cả marker (text cố định) LẪN SHA (backtick-wrapped) — note cũ cho
+ * SHA trước vẫn được giữ lại (lịch sử), chỉ skip note mới nếu cùng SHA.
+ */
+async function hasCiWaitNoteAlready(
+  ctx: MrContext,
+  sha: string,
+): Promise<boolean> {
+  const result = await listMrComments(ctx);
+  if (!result.ok) return false; // fail-open: post note để user biết
+  return result.comments.some(
+    (c) => c.body.includes(CI_WAIT_NOTE_MARKER) && c.body.includes(`\`${sha}\``),
+  );
+}
+
+/** Kết quả CI check — quyết định nhánh xử lý trong performReview. */
+type CiCheckResult = "proceed" | "deferred" | "skipped";
+
+/**
+ * Check pipeline status, decide tiếp tục review / enqueue đợi / skip.
+ *
+ * - CI running → `enqueuePendingReview` (deferred). Bot post note "⏸ đợi CI".
+ * - CI fail → `skipped` + post note (+ unapprove nếu block).
+ * - CI pass / no pipeline (lenient) → `proceed`.
+ *
+ * Testable: tách ra khỏi performReview để unit test mock GitLab API dễ hơn.
+ */
+export async function checkCiAndWait(
+  payload: MergeRequestWebhook,
+  cfg: ProjectConfig,
+  log: (msg: string) => void,
+): Promise<CiCheckResult> {
+  const ctx = mrContextFromWebhook(payload);
+  const result = await getMrPipelineStatus(ctx);
+
+  // Edge case: repo chưa setup CI (no pipeline). Lenient default → review anyway.
+  // Lý do: không block team chưa có CI; bot vẫn có giá trị review code.
+  if (!result.hasPipeline) {
+    log(`ci: no pipeline found — review anyway (lenient)`);
+    return "proceed";
+  }
+
+  const { status, sha } = result;
+
+  if (PIPELINE_RUNNING_STATES.has(status)) {
+    // CI đang chạy → enqueue đợi pipeline webhook.
+    const timeoutMs = resolveCiWaitTimeoutMs(cfg);
+    enqueuePendingReview(payload, timeoutMs, (timedOutPayload) => {
+      // Timeout fire — CI chạy quá lâu. Review anyway + log warning.
+      const tc = mrContextFromWebhook(timedOutPayload);
+      console.log(
+        `[review !${tc.mrIid}] ci timeout after ${timeoutMs}ms — proceeding review anyway`,
+      );
+      // Re-trigger review với skipCiCheck=true để tránh loop.
+      performReview(timedOutPayload, { skipCiCheck: true }).catch((err) => {
+        console.error(`[review !${tc.mrIid}] ci-timeout review error:`, err);
+      });
+    });
+    log(`ci: pipeline ${status} — enqueued, will review on pipeline success (timeout ${timeoutMs}ms)`);
+
+    // Dedup note: chỉ post "⏸ Đợi CI" nếu chưa post cho cùng SHA.
+    // Tránh spam note khi dev push liên tiếp trong lúc CI đang chạy.
+    if (await hasCiWaitNoteAlready(ctx, sha)) {
+      log(`ci: note already posted for SHA ${sha} — skipping duplicate`);
+    } else {
+      await postMrNote(
+        ctx,
+        `## ${CI_WAIT_NOTE_MARKER}\n\nPipeline đang chạy (\`${status}\`). Bot sẽ review tự động khi CI pass.\n\n_SHA: \`${sha}\` · Timeout: ${Math.floor(timeoutMs / 1000)}s_`,
+      ).catch(() => void 0);
+    }
+    return "deferred";
+  }
+
+  if (PIPELINE_FAILURE_STATES.has(status)) {
+    // CI fail/canceled/skipped → skip review + post note.
+    log(`ci: pipeline ${status} — skip review (CI failed)`);
+    await postMrNote(
+      ctx,
+      `## 🚫 CI ${status} — skip review\n\nPipeline \`${status}\`. Bot sẽ không review cho commit này.\n\n_Fix CI và push commit mới để trigger review lại._`,
+    ).catch(() => void 0);
+    if (cfg.block.enabled) {
+      await unapproveMr(ctx).catch(() => void 0);
+    }
+    return "skipped";
+  }
+
+  // status === "success" (hoặc các status khác như manual — coi như pass).
+  log(`ci: pipeline ${status} — proceed review`);
+  return "proceed";
 }
