@@ -143,10 +143,16 @@ export async function runPiReview(opts: {
   const tools: ToolDefinition<any, any, any>[] = createReviewTools(toolCtx);
 
   // Resolve model: explicit "provider/model" → getBuiltinModel; empty → let Pi auto-pick
+  // IMPORTANT: dùng `tools: [...]` allowlist để Pi expose customTools cho AI.
+  // `noTools: "all"` disable built-in NHƯNG cũng làm Pi không register customTools
+  // vào active tool list → AI không thấy tools (verified empirical).
+  // Fix: liệt kê tên tất cả custom tools vào `tools` allowlist.
+  const toolNames = tools.map((t) => t.name);
   let sessionOpts: ConstructorParameters<typeof Object>[0] = {
     cwd: opts.repoDir,
     agentDir: PI_AGENT_DIR,
-    noTools: "all",
+    noTools: "all",              // disable built-in read/bash/edit/write
+    tools: toolNames,            // expose custom tools (critical — without this AI sees no tools)
     customTools: tools,
     sessionManager: SessionManager.inMemory(opts.repoDir),
   };
@@ -203,14 +209,22 @@ export async function runPiReview(opts: {
 
   const unsubscribe = session.subscribe((evt: AgentSessionEvent) => {
     events.push(evt);
-    if (evt.type === "message_end" && evt.message.role === "assistant") {
-      for (const c of evt.message.content) {
+    // Log tool executions for debugging (helps spot "AI didn't call tools" issues)
+    const t = evt.type as string;
+    if (t === "tool_execution_start" || t === "tool_call") {
+      const toolName = (evt as { name?: string; toolName?: string }).name
+        ?? (evt as { toolName?: string }).toolName
+        ?? "unknown";
+      console.log(`[pi] tool call: ${toolName}`);
+    }
+    if (t === "message_end" && (evt as { message?: { role?: string } }).message?.role === "assistant") {
+      for (const c of (evt as { message: { content: Array<{ type: string; text?: string }> } }).message.content) {
         if (c.type === "text" && typeof c.text === "string") {
           markdown += c.text;
         }
       }
     }
-    if (evt.type === "agent_end") {
+    if (t === "agent_end") {
       resolveAgentEnd();
     }
   });
