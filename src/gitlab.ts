@@ -23,6 +23,7 @@ import type {
   MergeRequestObjectAttributes,
   MergeRequestWebhook,
   PipelineStatus,
+  PipelineWebhook,
 } from "./types.ts";
 
 const API_TOKEN = process.env.GITLAB_API_TOKEN ?? "";
@@ -552,4 +553,26 @@ export async function getMrPipelineStatus(
   } catch (e) {
     return { hasPipeline: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/**
+ * Resolve project ID từ pipeline webhook payload.
+ *
+ * **Quan trọng (fix BUG 7)**: GitLab KHÔNG đặt `project_id` trong
+ * `object_attributes` của pipeline webhook (như code cũ tưởng tượng) — mà đặt
+ * ở **top-level** `project.id` (xem docs: https://docs.gitlab.com/development/webhooks/).
+ *
+ * Trước fix: `attrs?.project_id` → luôn `undefined` → bot skip mọi pipeline
+ * webhook → CI wait mode stuck đến timeout 10 phút.
+ *
+ * Fallback chain (consistent với pattern resolve SHA `source_branch_sha ?? last_commit?.id`):
+ *   1. `pipeline.project.id` — primary, luôn có theo docs GitLab
+ *   2. `pipeline.merge_request.target_project_id` — fallback khi thiếu `project` block
+ *
+ * Pure function (không gọi API) — tách ra để test độc lập, không cần mock fetch.
+ */
+export function resolvePipelineProjectId(
+  pipeline: PipelineWebhook,
+): number | undefined {
+  return pipeline.project?.id ?? pipeline.merge_request?.target_project_id;
 }

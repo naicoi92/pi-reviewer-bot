@@ -9,6 +9,7 @@
 
 import { Hono } from "hono";
 import { consumePendingReview, pendingCount } from "./ciwait.ts";
+import { resolvePipelineProjectId } from "./gitlab.ts";
 import { inflightCount } from "./inflight.ts";
 import { performReview, shouldReview, verifyToken } from "./webhook.ts";
 import { globalSemaphore } from "./limiter.ts";
@@ -95,7 +96,12 @@ app.post("/webhook", async (c) => {
     const pipeline = raw as unknown as PipelineWebhook;
     const attrs = pipeline.object_attributes;
     const status = attrs?.status;
-    const projectId = attrs?.project_id;
+    // **Fix BUG 7**: GitLab đặt project ID ở top-level `project.id`, KHÔNG trong
+    // `object_attributes.project_id` (như code cũ tưởng tượng). Đọc sai field →
+    // mọi pipeline webhook bị skip với log `projectId=undefined` → CI wait mode
+    // stuck đến timeout 10 phút. Dùng helper resolvePipelineProjectId với fallback
+    // chain (xem gitlab.ts).
+    const projectId = resolvePipelineProjectId(pipeline);
     const sha = attrs?.sha;
     const shortSha = sha ? sha.slice(0, 8) : "?";
 

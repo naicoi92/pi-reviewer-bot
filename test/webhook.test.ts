@@ -5,7 +5,7 @@
 
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { resolveCiWaitTimeoutMs, shouldReview, verifyToken } from "../src/webhook.ts";
-import { aggregatePipelineStatus, mrContextFromWebhook, type MrPipelineEntry } from "../src/gitlab.ts";
+import { aggregatePipelineStatus, mrContextFromWebhook, resolvePipelineProjectId, type MrPipelineEntry } from "../src/gitlab.ts";
 import { DEFAULT_CONFIG, mergeConfig, type ProjectConfig } from "../src/config.ts";
 import {
   consumePendingReview,
@@ -21,7 +21,7 @@ import {
   _resetForTest as resetInflight,
 } from "../src/inflight.ts";
 import { createInitialToolState } from "../src/tools/index.ts";
-import type { MergeRequestWebhook, PipelineStatus } from "../src/types.ts";
+import type { MergeRequestWebhook, PipelineStatus, PipelineWebhook } from "../src/types.ts";
 
 function makeWebhook(overrides: Partial<MergeRequestWebhook> = {}): MergeRequestWebhook {
   return {
@@ -915,5 +915,136 @@ describe("BUG 5 regression: aggregatePipelineStatus filter đúng khi SHA resolv
     if (result.hasPipeline) {
       expect(result.status).toBe("success");
     }
+  });
+});
+
+// ─── BUG 7 regression: pipeline webhook không resolve được projectId ──
+// Root cause: code cũ đọc `attrs?.project_id` từ `object_attributes`, nhưng
+// GitLab pipeline webhook payload thật đặt project_id ở **top-level** `project.id`
+// (xem docs: https://docs.gitlab.com/development/webhooks/).
+//
+// Trước fix: `attrs?.project_id` → luôn undefined → bot skip mọi pipeline
+// webhook → CI wait mode stuck đến timeout 10 phút.
+//
+// Log signature trước fix:
+//   [webhook] pipeline skip — missing project_id or sha (projectId=undefined, sha=c10bf102...)
+
+describe("BUG 7 regression: resolvePipelineProjectId đọc đúng field", () => {
+  /** Fixture rút gọn từ payload pipeline webhook THẬT của GitLab (lttech-ga/live-stream !8). */
+  function makePipelineWebhook(
+    overrides: Partial<PipelineWebhook> = {},
+  ): PipelineWebhook {
+    return {
+      object_kind: "pipeline",
+      event_type: "pipeline",
+      user: { id: 26883296, name: "naicoi", username: "naicoi92" },
+      project: {
+        id: 84085557,
+        name: "Live Stream",
+        path: "live-stream",
+        path_with_namespace: "lttech-ga/live-stream",
+        namespace: "lttech-ga",
+        web_url: "https://gitlab.com/lttech-ga/live-stream",
+        git_http_url: "https://gitlab.com/lttech-ga/live-stream.git",
+        git_ssh_url: "git@gitlab.com:lttech-ga/live-stream.git",
+        default_branch: "main",
+        visibility_level: 0,
+      },
+      commit: {
+        id: "c10bf102c1f7136d0a04838c16e73aab356637a0",
+        message: "T-11: StreamState Display/FromStr",
+        timestamp: "2026-07-05T18:19:50+07:00",
+      },
+      object_attributes: {
+        id: 2652759704,
+        ref: "feat/T-11-state-machine",
+        status: "success",
+        sha: "c10bf102c1f7136d0a04838c16e73aab356637a0",
+        source: "merge_request_event",
+      },
+      merge_request: {
+        id: 503447125,
+        iid: 8,
+        source_branch: "feat/T-11-state-machine",
+        target_branch: "main",
+        source_project_id: 84085557,
+        target_project_id: 84085557,
+        state: "opened",
+      },
+      builds: [],
+      ...overrides,
+    };
+  }
+
+  test("payload chuẩn GitLab (project.id top-level) → resolve đúng", () => {
+    // Reproduce payload thật user paste — KHÔNG có object_attributes.project_id.
+    // Code cũ đọc field đó → undefined → skip. Code mới phải resolve từ project.id.
+    const pipeline = makePipelineWebhook();
+    expect(resolvePipelineProjectId(pipeline)).toBe(84085557);
+  });
+
+  test("fallback merge_request.target_project_id khi thiếu project block", () => {
+    // Edge case: 1 số payload legacy/self-managed không có top-level project.
+    // Fallback về merge_request.target_project_id (đây là project đang review).
+    const pipeline = makePipelineWebhook({ project: undefined });
+    expect(resolvePipelineProjectId(pipeline)).toBe(84085557);
+  });
+
+  test("returns undefined khi cả project + merge_request đều thiếu → bot skip", () => {
+    // Malformed payload (không nên xảy ra nhưng defensive) → undefined → skip.
+    const pipeline = makePipelineWebhook({
+      project: undefined,
+      merge_request: undefined,
+    });
+    expect(resolvePipelineProjectId(pipeline)).toBeUndefined();
+  });
+
+  test("KEY MATCH: resolvePipelineProjectId khớp key với enqueuePendingReview", () => {
+    // Integration property test:
+    // - MR webhook đến → enqueuePendingReview key = `${target_project_id}:${sha}`
+    // - Pipeline webhook đến → consumePendingReview(projectId, sha)
+    // - 2 phải MATCH nhau thì entry mới được consume → trigger review.
+    //
+    // Trước fix BUG 7: pipeline webhook gọi consumePendingReview(undefined, sha)
+    // → không match → CI wait stuck.
+    const mrWebhook = makeWebhook({
+      project: {
+        id: 84085557,
+        name: "Live Stream",
+        path: "live-stream",
+        path_with_namespace: "lttech-ga/live-stream",
+        namespace: "lttech-ga",
+        web_url: "https://gitlab.com/lttech-ga/live-stream",
+        git_http_url: "https://gitlab.com/lttech-ga/live-stream.git",
+        git_ssh_url: "git@gitlab.com:lttech-ga/live-stream.git",
+        default_branch: "main",
+        visibility_level: 0,
+      },
+      object_attributes: {
+        ...makeWebhook().object_attributes,
+        iid: 8,
+        target_project_id: 84085557,
+        source_branch_sha: "c10bf102c1f7136d0a04838c16e73aab356637a0",
+      },
+    });
+    const pipelineWebhook = makePipelineWebhook();
+
+    // MR webhook side
+    resetCiwait();
+    enqueuePendingReview(mrWebhook, 60_000, () => {});
+    expect(pendingCount()).toBe(1);
+
+    // Pipeline webhook side — phải resolve cùng projectId để consume được entry
+    const resolvedProjectId = resolvePipelineProjectId(pipelineWebhook);
+    expect(resolvedProjectId).toBe(84085557);
+
+    const entry = consumePendingReview(
+      resolvedProjectId ?? -1,
+      pipelineWebhook.object_attributes.sha,
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.payload.object_attributes.iid).toBe(8);
+    expect(pendingCount()).toBe(0); // entry đã consume
+    resetCiwait();
   });
 });
