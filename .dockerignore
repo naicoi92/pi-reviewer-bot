@@ -1,0 +1,30 @@
+# Docker ignore — giảm build context size
+.git
+.gitignore
+.github
+.editorconfig
+.vscode
+.idea
+
+# Docs không cần trong image
+README.md
+LICENSE
+docs/
+*.md
+!bot/agents/*.md  # giữ agent prompts — cần cho runtime
+
+# Test files
+bot/test/
+**/*.test.ts
+**/*.spec.ts
+
+# Bot local artifacts
+bot/node_modules
+bot/.env
+bot/.env.local
+bot/dist
+bot/bun.lockb
+
+# OS noise
+.DS_Store
+Thumbs.db

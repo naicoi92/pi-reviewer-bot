@@ -1,0 +1,27 @@
+{
+  "name": "pi-reviewer-bot",
+  "version": "0.2.0",
+  "description": "GitLab webhook bot — AI code review với Pi Coding Agent + Z.ai GLM-5.2 (Mức 3 full tool)",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@gitbeaker/rest": "^42.0.0",
+    "hono": "^4.6.0",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

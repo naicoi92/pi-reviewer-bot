@@ -1,0 +1,57 @@
+# docker-compose cho pi-reviewer-bot
+#
+# Usage:
+#   1. Copy .env.example → .env, điền giá trị
+#   2. docker compose up -d
+#   3. Check logs: docker compose logs -f
+#   4. Webhook endpoint: http://localhost:3000/webhook
+#
+# Production notes:
+#   - Restart policy `unless-stopped` tự revive khi crash
+#   - Healthcheck gọi /healthz mỗi 30s
+#   - Memory limit 512MB (đủ cho 3 review song song)
+#   - Volume `/tmp/pi-reviews` để cache repo clone (speed up re-review)
+
+services:
+  pi-reviewer-bot:
+    build:
+      context: .
+      dockerfile: bot/Dockerfile
+    image: pi-reviewer-bot:latest
+    container_name: pi-reviewer-bot
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      # Có thể override tại đây nếu không dùng .env file
+      - NODE_ENV=production
+    volumes:
+      # Cache repo clone — speed up re-review cùng MR
+      - pi-reviews-cache:/tmp/pi-reviews
+      - pi-agent-cache:/tmp/pi-agent
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://localhost:3000/healthz || exit 1",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pi-reviews-cache:
+  pi-agent-cache:

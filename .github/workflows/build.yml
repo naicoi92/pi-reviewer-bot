@@ -1,0 +1,174 @@
+# ─────────────────────────────────────────────────────────────
+# Build & push Docker images lên GitHub Container Registry
+#
+# 2 images song song:
+#   1. pi-reviewer-bot — webhook service (Alpine + Bun --compile, ~115MB)
+#      Dùng khi deploy bot service (VPS, K8s, homelab)
+#   2. pi-reviewer     — CI image (node + Pi + glab CLI)
+#      Dùng trong .gitlab-ci.yml của project khác
+#
+# Trigger:
+#   - Push tag `v*`     → build + push, tag image với version + latest
+#   - Push branch main  → build + push, tag image với `main` (rolling)
+#   - PR                → build only (không push), verify Dockerfile
+#
+# Image output:
+#   ghcr.io/naicoi92/pi-reviewer-bot:{tag}  (webhook service)
+#   ghcr.io/naicoi92/pi-reviewer:{tag}      (CI image)
+# ─────────────────────────────────────────────────────────────
+
+name: build-image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ─── Job 1: Build bot webhook service image ────────────────
+  build-bot:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadata for pi-reviewer-bot
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/pi-reviewer-bot
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=pi-reviewer-bot
+            org.opencontainers.image.description=GitLab webhook bot — AI code review with Pi SDK + Z.ai GLM-5.2
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push bot image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./bot/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/pi-reviewer-bot:buildcache-${{ matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}/pi-reviewer-bot:buildcache-{2},mode=max', env.REGISTRY, github.repository_owner, matrix.platform == 'linux/arm64' && 'arm64' || 'amd64') || '' }}
+
+  # ─── Job 2: Build CI image (cho .gitlab-ci.yml dùng) ───────
+  build-ci:
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Metadata for pi-reviewer (CI image)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/pi-reviewer
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=pi-reviewer
+            org.opencontainers.image.description=Pi + glab CLI image for AI code review on GitLab CI
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push CI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            PI_VERSION=latest
+            GLAB_VERSION=1.106.0
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/pi-reviewer:buildcache-${{ matrix.platform == 'linux/arm64' && 'arm64' || 'amd64' }}
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}/{1}/pi-reviewer:buildcache-{2},mode=max', env.REGISTRY, github.repository_owner, matrix.platform == 'linux/arm64' && 'arm64' || 'amd64') || '' }}
+
+  # ─── Merge manifest multi-arch cho cả 2 images ─────────────
+  merge-manifests:
+    needs: [build-bot, build-ci]
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      packages: write
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge multi-arch manifests
+        run: |
+          set -e
+          OWNER="${{ github.repository_owner }}"
+          for IMAGE in pi-reviewer-bot pi-reviewer; do
+            for TAG in latest main $(echo "${GITHUB_REF##*/}" | sed 's/^v//'); do
+              echo "📦 Merging ${IMAGE}:${TAG}"
+              docker buildx imagetools create \
+                -t "${{ env.REGISTRY }}/${OWNER}/${IMAGE}:${TAG}" \
+                "${{ env.REGISTRY }}/${OWNER}/${IMAGE}:${TAG}" 2>/dev/null || true
+            done
+          done
