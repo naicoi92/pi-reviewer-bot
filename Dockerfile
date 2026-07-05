@@ -45,9 +45,9 @@ COPY tsconfig.json ./
 # với alpine runtime. Không cần chỉ định --target (Bun auto-detect platform).
 # Multi-arch: buildx sẽ chạy stage này trên mỗi platform riêng, Bun tự build đúng variant.
 RUN bun build --compile \
-    --minify \
-    --outfile=/build/pi-reviewer-bot \
-    ./src/index.ts
+  --minify \
+  --outfile=/build/pi-reviewer-bot \
+  ./src/index.ts
 
 # Verify binary built
 RUN ls -lh /build/pi-reviewer-bot && file /build/pi-reviewer-bot
@@ -60,19 +60,20 @@ FROM alpine:3.20
 # libstdc++ + libgcc (Bun binary cần glibc libs — Alpine dùng musl nhưng
 # các lib này cung cấp compat layer cho binary compiled với GCC).
 RUN apk add --no-cache \
-      git \
-      ca-certificates \
-      tzdata \
-      wget \
-      tini \
-      libstdc++ \
-      libgcc \
-      libc6-compat \
-    && update-ca-certificates \
-    && addgroup -S -g 1001 bot \
-    && adduser -S -D -H -u 1001 -G bot bot \
-    && mkdir -p /tmp/pi-reviews /tmp/pi-agent /app \
-    && chown -R bot:bot /tmp/pi-reviews /tmp/pi-agent /app
+  git \
+  curl \
+  ca-certificates \
+  tzdata \
+  wget \
+  tini \
+  libstdc++ \
+  libgcc \
+  libc6-compat \
+  && update-ca-certificates \
+  && addgroup -S -g 1001 bot \
+  && adduser -S -D -H -u 1001 -G bot bot \
+  && mkdir -p /tmp/pi-reviews /tmp/pi-agent /app \
+  && chown -R bot:bot /tmp/pi-reviews /tmp/pi-agent /app
 
 WORKDIR /app
 
@@ -91,15 +92,15 @@ EXPOSE 3000
 
 # Env defaults (override qua `docker run -e` hoặc docker-compose)
 ENV PI_AGENT_DIR=/tmp/pi-agent \
-    REPO_TMP_ROOT=/tmp/pi-reviews \
-    NODE_ENV=production \
-    PORT=3000 \
-    LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+  REPO_TMP_ROOT=/tmp/pi-reviews \
+  NODE_ENV=production \
+  PORT=3000 \
+  LANG=C.UTF-8 \
+  LC_ALL=C.UTF-8
 
 # Healthcheck — gọi /healthz mỗi 30s
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD wget -qO- http://localhost:3000/healthz || exit 1
+  CMD wget -qO- http://localhost:3000/healthz || exit 1
 
 # tini làm init — handle SIGTERM đúng cách khi docker stop
 ENTRYPOINT ["/sbin/tini", "--"]
