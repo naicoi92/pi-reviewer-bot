@@ -22,24 +22,22 @@ pi-reviewer-bot/
 ├── README.md                       # overview + quick start
 ├── Dockerfile                      # Multi-stage: Bun --compile + Alpine, ~115MB
 ├── docker-compose.yml              # dev/test convenience
-├── package.json                    # deps: @earendil-works/pi-coding-agent, hono, @gitbeaker/rest, yaml
+├── package.json                    # deps: @earendil-works/pi-coding-agent, @gitbeaker/rest, yaml (no hono — CLI mode)
 ├── tsconfig.json                   # strict mode
 ├── agents/
 │   ├── code-reviewer.md            # BOT-OWNED system prompt (load runtime, KHÔNG copy sang project)
 │   └── REVIEW_RULES.template.md    # template optional cho .pi/REVIEW_RULES.md (project-owned)
 ├── src/
-│   ├── index.ts                    # Hono app entrypoint (POST /webhook, GET /healthz, /stats)
-│   ├── webhook.ts                  # verify token + filter + orchestrate review + CI wait check
-│   ├── gitlab.ts                   # GitLab API client (approve, comment, get_issue, pipeline status, ...)
-│   ├── repo.ts                     # shallow clone source branch per-MR
+│   ├── index.ts                    # CLI entrypoint (CI-job mode, exit-code contract)
+│   ├── context.ts                  # mrContextFromEnv() — đọc GitLab CI predefined vars
+│   ├── review.ts                   # performReview orchestration + deriveOutcome
+│   ├── gitlab.ts                   # GitLab API client (approve, comment, get_issue, ...)
+│   ├── repo.ts                     # repoDir (process.cwd) + readFileOrNull
 │   ├── pi.ts                       # Pi SDK wrapper — createAgentSession + subscribe
-│   ├── config.ts                   # .pi/config.yaml loader + defaults
-│   ├── ciwait.ts                   # CI wait coordinator (pending Map between MR + pipeline webhooks)
-│   ├── inflight.ts                 # in-flight review coordinator (cancel review cũ khi push mới — fix BUG 3)
-│   ├── stats.ts                    # per-project observability
-│   ├── limiter.ts                  # semaphore + rate limit
+│   ├── config.ts                   # .pi/config.yaml loader + mergeConfig (drop ci.*, add limits)
+│   ├── stats.ts                    # emitStatsLine (stdout JSON)
 │   ├── ssrf.ts                     # SSRF guard cho fetch_url (block private IP + non-http protocols)
-│   ├── types.ts                    # webhook payload + types (MR + Pipeline)
+│   ├── types.ts                    # MR data types (webhook payload types removed)
 │   └── tools/                      # 12 custom tools (defineTool)
 │       ├── index.ts                # tool factory + shared state
 │       ├── result.ts               # ok/err/done helpers (AgentToolResult shape)
@@ -56,7 +54,9 @@ pi-reviewer-bot/
 │       ├── approve_mr.ts           # approve (guardrail: summary + 0 critical)
 │       └── request_changes.ts      # unapprove (block merge)
 └── test/
-    ├── webhook.test.ts             # webhook + coordinator tests
+    ├── context.test.ts             # mrContextFromEnv tests
+    ├── config.test.ts              # config schema (limits, ci.* removed)
+    ├── review.test.ts              # deriveOutcome (exit-code contract)
     ├── ssrf.test.ts                # SSRF guard tests
     └── tools.test.ts               # tool registration tests
 ```
@@ -66,6 +66,7 @@ pi-reviewer-bot/
 AI reviewer có 12 tools (chia 2 nhóm):
 
 ### Read (không mutate state)
+
 1. `fetch_file(path)` — đọc file verify context
 2. `get_issue(iid)` — GitLab issue gốc + comments + linked MRs
 3. `list_mr_comments()` — existing comments (idempotent re-review)
@@ -76,10 +77,11 @@ AI reviewer có 12 tools (chia 2 nhóm):
 8. `fetch_url(url)` — read URL content (sau web_search hoặc URL đã biết)
 
 ### Write (mutate state + call GitLab API)
-9. `post_inline_comment(path, line, comment, severity)` — DiffNote line-specific
-10. `post_summary(markdown)` — top-level verdict (BẮT BUỘC trước approve)
-11. `approve_mr(rationale)` — approve (guardrail: summary + 0 critical)
-12. `request_changes(reason)` — unapprove (block merge)
+
+1. `post_inline_comment(path, line, comment, severity)` — DiffNote line-specific
+2. `post_summary(markdown)` — top-level verdict (BẮT BUỘC trước approve)
+3. `approve_mr(rationale)` — approve (guardrail: summary + 0 critical)
+4. `request_changes(reason)` — unapprove (block merge)
 
 **Guardrail approve_mr**: block nếu chưa post_summary HOẶC criticalCount > 0.
 
@@ -112,6 +114,7 @@ Bot dùng Pi Coding Agent SDK → hỗ trợ 40+ providers. KHÔNG hardcode 1 pr
 | Ollama | (không cần key) | Local, free |
 
 Model resolution priority:
+
 1. `.pi/config.yaml` → `llm.model` (per-project override)
 2. `DEFAULT_MODEL` env var (deployment-wide)
 3. Pi auto-detect (provider đầu tiên có API key)
@@ -121,23 +124,27 @@ Set `DEFAULT_MODEL=` (empty) để Pi auto-pick. Hoặc explicit `DEFAULT_MODEL=
 ## Critical Conventions
 
 ### TypeScript
+
 - **strict mode** (`tsconfig.json`): `noUnusedLocals`, `noUnusedParameters`, `noUncheckedIndexedAccess`, `verbatimModuleSyntax`
 - Typecheck: `bun run typecheck` (must pass before commit)
 - ESM only (`"type": "module"`)
 - No `any` — dùng `unknown` + type guard
 
 ### Naming
+
 - File: `snake_case.ts` (vd `post_inline_comment.ts`)
 - Function: `camelCase` (vd `mrContextFromWebhook`)
 - Type/Interface: `PascalCase` (vd `MrContext`, `ReviewToolState`)
 - Const enum-like: `UPPER_SNAKE_CASE` (vd `MAX_TOOL_CALLS`)
 
 ### Comments
+
 - Viết tiếng Việt cho business logic
 - Code identifier giữ tiếng Anh
 - JSDoc cho mọi public function (export)
 
 ### Tests
+
 - File: `*.test.ts` trong `test/` folder
 - Framework: `bun:test` (built-in)
 - Run: `bun test`
@@ -184,12 +191,11 @@ scope:
 block:
   enabled: true                    # block merge cho đến khi bot approve
 
-ci:
-  require: true                    # bật CI wait mode — đợi CI pass mới review (cần enable Pipeline events webhook)
-  waitTimeoutMs: 900000            # timeout per-project (ms) — optional, default = env CI_WAIT_TIMEOUT_MS
+# ci.* — ĐÃ LOẠI BỎ (D1-revised). CI native lo wait qua `needs:`.
+# review.limits (purge từ env DEFAULT_MODEL/MAX_TOOL_CALLS_PER_REVIEW/REVIEW_TIMEOUT_MS):
 
 llm:
-  model: zai/glm-5.2               # override default (có thể dùng openai/gpt-4o, ...)
+  model: zai/glm-5.2               # model source duy nhất (DEFAULT_MODEL env đã purge)
 ```
 
 Xem [`docs/CONFIG.md`](docs/CONFIG.md) cho schema đầy đủ.
@@ -198,7 +204,7 @@ Xem [`docs/CONFIG.md`](docs/CONFIG.md) cho schema đầy đủ.
 
 | # | Quyết định | Lý do |
 |---|---|---|
-| D1 | Webhook service (không CI job) | Multi-project scale, central control |
+| D1 | ~~Webhook service~~ **OBSOLETE — reversed by D17** | Multi-project scale (webhook-era) |
 | D2 | Pi SDK in-process (không subprocess) | No cold start, type-safe, custom tools native |
 | D3 | Mức 3 full tool (AI có approve_mr) | Clean intent, không parse verdict regex |
 | D4 | Top-level note + DiffNote inline | MVP đầy đủ cho 95% use case |
@@ -214,8 +220,13 @@ Xem [`docs/CONFIG.md`](docs/CONFIG.md) cho schema đầy đủ.
 | D14 | `mrContextFromWebhook` fallback SHA consistent với `ciwait.ts` + `inflight.ts` (fix BUG 5) | Trước đây 3 chỗ resolve SHA khác nhau → `getMrPipelineStatus` filter theo SHA undefined → lấy tất cả pipelines (kể cả zombie cũ running) → CI wait mode stuck. Fix:统 nhất `source_branch_sha ?? last_commit.id` + log warn khi vẫn undefined (fallback newest pipeline). |
 | D15 | Pipeline webhook handler log mọi skip path (fix BUG 6) | 3 skip path silent khiến debug "pipeline webhook có đến bot không" vô hiệu. Log `[webhook] pipeline skip <project>@<short-sha> — <reason>` consistent với MR webhook skip log. |
 | D16 | Tách system prompt: bot-controlled base + project append qua `.pi/REVIEW_RULES.md` | Bot owned phần "how to use tools / workflow" — project không copy. Project chỉ viết info về project của họ. Bot upgrade tools → project auto kế thừa. Dùng `appendSystemPrompt` của Pi SDK DefaultResourceLoader. Backwards compat: `.pi/agents/code-reviewer.md` legacy vẫn đọc + warn. |
+| D17 | **Webhook service → GitLab CI job (reverse D1)** | ciwait in-memory Map mất khi restart, SHA matching BUG 5 (3 sites khác nhau), bot online 24/7, inflight cancel phức tạp. CI native `needs:` + predefined env vars giải tất cả. Hard cutover + major bump. Config: purge env knobs (`DEFAULT_MODEL`/`MAX_TOOL_CALLS_PER_REVIEW`/`REVIEW_TIMEOUT_MS`) → `.pi/config.yaml` (`review.limits`, `llm.model`). Token = Project Access Token (không `CI_JOB_TOKEN`). |
 
 Xem [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) cho decision chi tiết.
+
+**OBSOLETE (D1-revised đảo sang CI-job mode):** D6 (limiter), D10 (ciwait),
+D11 (inflight cancel), D12 (unapprove-on-push), D14 (SHA unify), D15 (pipeline
+webhook skip log). CI native (`needs:` + predefined env vars) thay thế toàn bộ.
 
 ## Known Limitations (post-MVP)
 

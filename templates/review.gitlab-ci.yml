@@ -1,0 +1,33 @@
+# pi-reviewer-bot — GitLab CI job template (D1-revised: CI-job mode).
+#
+# Bot chạy như 1 GitLab CI job CUỐI pipeline. Pipeline pass (needs) → review job
+# chạy → approve/request_changes MR qua GitLab API. Không còn webhook server.
+#
+# Setup đầy đủ: xem docs/CI_SETUP.md. Tóm tắt:
+#   1. Set CI/CD Variables: GITLAB_API_TOKEN (Project Access Token, scope api,
+#      role approver) + LLM key (vd ZAI_API_KEY).
+#   2. Add bot account làm required Approval Rule approver (để block merge).
+#   3. Include template này vào .gitlab-ci.yml của project (hoặc copy directly).
+#
+# Include (URL raw đầy đủ xem docs/CI_SETUP.md):
+#   include:
+#     - remote: '<github-raw-url>/templates/review.gitlab-ci.yml'
+
+pi-review:
+  stage: review
+  image:
+    name: ghcr.io/naicoi92/pi-reviewer-bot:latest
+    entrypoint: [""]
+  # Chỉ chạy trên MR pipeline — skip cho push main/tag.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  # CI native handles wait: review chỉ chạy sau khi test/build pass.
+  # Liệt kê job names thực tế trong pipeline project của bạn.
+  needs:
+    - job: test
+    - job: build
+  variables:
+    # Bot dùng GitLab API (diff/comments/approve), không cần checkout source.
+    GIT_STRATEGY: none
+  script:
+    - /app/pi-reviewer-bot
