@@ -50,7 +50,7 @@ describe("createReviewTools registration", () => {
 		const tools = createReviewTools(makeCtx());
 		const expected = [
 			// Read
-			"fetch_file",
+			"fetch_files",
 			"get_issue",
 			"list_mr_comments",
 			"list_mr_commits",

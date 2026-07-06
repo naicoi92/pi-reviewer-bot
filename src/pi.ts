@@ -162,7 +162,7 @@ function buildPrompt(opts: {
 	const isTruncated = fullDiff.length > DIFF_CAP;
 	const diffText = isTruncated
 		? fullDiff.slice(0, DIFF_CAP) +
-			`\n\n[⚠️ DIFF TRUNCATED at ${DIFF_CAP} chars. ${fullDiff.length - DIFF_CAP} chars omitted. Call fetch_file(path) to read remaining files individually.]`
+			`\n\n[⚠️ DIFF TRUNCATED at ${DIFF_CAP} chars. ${fullDiff.length - DIFF_CAP} chars omitted. Call fetch_files([paths]) to read remaining files.]`
 		: fullDiff;
 
 	return [

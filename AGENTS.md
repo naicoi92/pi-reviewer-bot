@@ -9,7 +9,7 @@
 spawn AI code review qua **Pi Coding Agent SDK** → post comments + approve/request_changes.
 
 - **Stack**: Bun 1.1+ runtime (compiled standalone), Hono HTTP framework, Pi SDK in-process
-- **Architecture**: Mức 3 full tool — AI có 10 tools để tự decide approve
+- **Architecture**: Mức 3 full tool — AI có 13 tools để tự decide approve
 - **LLM**: Multi-provider (Z.ai, OpenAI, Anthropic, DeepSeek, Gemini, Ollama, ...) qua Pi SDK
 - **Hosting**: Docker container (Alpine runtime, multi-arch amd64+arm64), chạy bất cứ đâu
 - **License**: MIT
@@ -71,7 +71,7 @@ AI reviewer có 13 custom tools:
 
 ### Read (không mutate state)
 
-1. `fetch_file(paths)` — đọc NHIỀU file song song verify context (array preferred, string shorthand)
+1. `fetch_files(paths)` — đọc NHIỀU file song song verify context (array preferred, string shorthand)
 2. `get_issue(iid)` — GitLab issue gốc + comments + linked MRs
 3. `list_mr_comments()` — existing comments (idempotent re-review)
 4. `list_mr_commits()` — commit history

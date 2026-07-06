@@ -18,7 +18,7 @@ scope:
   enabled: false                            # default false — bật scope alignment check
   convention: "feat/T-XX-*"                 # branch pattern → task ID
   resolvesPattern: "Resolves: #(\\d+)"      # MR description → issue number
-  taskIndex: docs/design/07-roadmap.md      # file tra cứu task (AI đọc qua fetch_file)
+  taskIndex: docs/design/07-roadmap.md      # file tra cứu task (AI đọc qua fetch_files)
 
 block:
   enabled: false                            # default false — block merge đến khi bot approve
@@ -55,12 +55,12 @@ llm:
 ### `scope` — scope alignment check (optional)
 
 Khi `enabled: true`, AI reviewer verify MR resolve 1 task. **AI đọc `.pi/config.yaml`
-(quan `fetch_file`) + system prompt** để biết scope rules — bot KHÔNG hard-enforce
+(quan `fetch_files`) + system prompt** để biết scope rules — bot KHÔNG hard-enforce
 trước review (skip logic chỉ là `skipTitle/skipBranchRegex`):
 
 - `convention`: branch pattern extract task ID (vd `feat/T-42-*` → `T-42`).
 - `resolvesPattern`: RegExp extract issue từ MR description.
-- `taskIndex`: file roadmap/task list (AI đọc qua `fetch_file` để tra cứu).
+- `taskIndex`: file roadmap/task list (AI đọc qua `fetch_files` để tra cứu).
 
 ### `block` — bot approval state (merge gate)
 

@@ -57,7 +57,7 @@ AI reviewer có **13 tools**, tự decide approve/request_changes (không parse 
 
 | Nhóm | Tools |
 |---|---|
-| **Read** | `fetch_file`, `get_issue`, `list_mr_comments`, `list_mr_commits`, `list_wiki_pages`, `get_wiki_page` |
+| **Read** | `fetch_files`, `get_issue`, `list_mr_comments`, `list_mr_commits`, `list_wiki_pages`, `get_wiki_page` |
 | **Web lookup** | `web_search`, `fetch_urls`, `get_search_content` — tra version/API/CVE (SSRF guard) |
 | **Write** | `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` |
 
@@ -75,7 +75,7 @@ Job fail = bot lỗi → MR blocked (safe default). Xem [USAGE §7](docs/USAGE.m
 ## Tính năng
 
 - ✅ **Multi-provider** — Z.ai/OpenAI/Anthropic/DeepSeek/Gemini/Ollama
-- ✅ **12 tools** — fetch context, web search, inline comments, approve/changes
+- ✅ **13 tools** — fetch context, web search, inline comments, approve/changes (`fetch_files`/`fetch_urls` hỗ trợ batch)
 - ✅ **CI native wait** — job đặt cuối pipeline (`needs:`), không state in-memory
 - ✅ **Merge gate** — block MR đến khi bot approve
 - ✅ **Per-project config** — `.pi/config.yaml` (review/scope/block/llm/limits)
@@ -109,7 +109,7 @@ pi-reviewer-bot/
 │   ├── pi.ts               # Pi SDK wrapper
 │   ├── config.ts           # .pi/config.yaml loader + mergeConfig
 │   ├── repo.ts stats.ts ssrf.ts types.ts
-│   └── tools/              # 12 tools
+│   └── tools/              # 13 tools
 ├── templates/
 │   ├── review.yml          # CI Component (spec.inputs)
 │   └── review.gitlab-ci.yml # Raw include fallback

@@ -31,8 +31,8 @@ pi-review job (image bot, CI runner)
    ├─ Load .pi/config.yaml (cwd)
    ├─ unapprove MR nếu block.enabled (revoke approval cũ)
    ├─ fetch diff qua GitLab API
-   ├─ runPiReview: AI reviewer dùng 13 tools (fetch_file, web_search, fetch_urls,
-   │              post_summary, approve_mr / request_changes, ...) — fetch_file + fetch_urls
+   ├─ runPiReview: AI reviewer dùng 13 tools (fetch_files, web_search, fetch_urls,
+   │              post_summary, approve_mr / request_changes, ...) — fetch_files + fetch_urls
    │              hỗ trợ batch (truyền array, đọc song song trong 1 call)
    ├─ derive outcome từ toolState
    └─ exit code → MR state (exit 1 = MR blocked)
@@ -188,7 +188,7 @@ Xem schema đầy đủ: [`docs/CONFIG.md`](CONFIG.md).
 1. **Tạo branch + commit** theo convention (vd `feat/T-42-login`).
 2. **Mở MR** — description có `Resolves: #42` (nếu scope check bật).
 3. **Push** → pipeline chạy (lint/test/build) → `pi-review` job chạy cuối.
-4. **Bot review** (~30s-5 phút tùy diff): đọc diff, fetch_file verify context,
+4. **Bot review** (~30s-5 phút tùy diff): đọc diff, fetch_files verify context,
    web_search tra dep/CVE nếu cần, post inline comments + summary, ra verdict.
 5. **Đọc comments** → fix → push commit mới → pipeline + review chạy lại.
 6. **Bot approve** khi pass → MR unblock → merge.
