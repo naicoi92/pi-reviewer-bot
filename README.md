@@ -18,7 +18,7 @@ Multi-provider (40+): Z.ai GLM, OpenAI, Anthropic, DeepSeek, Gemini, Ollama...
 | Doc | Purpose |
 |---|---|
 | **[📖 Hướng dẫn sử dụng đầy đủ](docs/USAGE.md)** | Setup → config → daily workflow → troubleshooting → migrate (bắt đầu ở đây) |
-| **[📖 CI Setup](docs/CI_SETUP.md)** | PAT + Approval Rule + CI variables + include template (Component/raw) |
+| **[📖 CI Setup](docs/CI_SETUP.md)** | Token (tier-aware) + merge gate + CI variables + include template |
 | **[📖 Config Schema](docs/CONFIG.md)** | `.pi/config.yaml` full reference |
 | **[📖 Architecture](docs/ARCHITECTURE.md)** | Design + decision log (D1-D17) |
 
@@ -28,8 +28,8 @@ Multi-provider (40+): Z.ai GLM, OpenAI, Anthropic, DeepSeek, Gemini, Ollama...
 
 **Project side** (xem [USAGE](docs/USAGE.md) chi tiết):
 
-1. **Token**: Project → Settings → Access Tokens → `pi-reviewer-bot`, Role Developer, scope `api`.
-2. **Approval Rule**: Settings → Merge requests → require `@pi-reviewer-bot` (để block merge).
+1. **Token**: Personal Access Token (Free) hoặc Project Access Token (Premium+) — scope `api`, role Developer. (CI_JOB_TOKEN không dùng được.)
+2. **Merge gate**: Settings → Repository → Protected branches → “Pipelines must succeed” (mọi tier — pi-review exit 1 blocks merge).
 3. **CI/CD Variables**: `GITLAB_API_TOKEN` + `ZAI_API_KEY` (masked).
 4. **Include template** trong `.gitlab-ci.yml`:
 
@@ -47,7 +47,7 @@ Multi-provider (40+): Z.ai GLM, OpenAI, Anthropic, DeepSeek, Gemini, Ollama...
 
 Mở MR → pipeline chạy → `pi-review` job review → bot comment + approve/request_changes.
 
-> ⚠️ `CI_JOB_TOKEN` **không dùng được** (chỉ đọc MR) — phải là Project Access Token / user PAT.
+> ⚠️ `CI_JOB_TOKEN` **không dùng được** (chỉ đọc MR) — phải là Personal Access Token (Free) / Project Access Token (Premium+).
 
 ---
 

@@ -45,7 +45,7 @@ ephemeral. CI native `needs:` đảm bảo review chỉ chạy sau khi CI pass.
 - **GitLab** (SaaS hoặc self-managed) có CI/CD runners.
 - **LLM provider**: 1 API key bất kỳ Pi hỗ trợ (Z.ai / OpenAI / Anthropic / DeepSeek /
   Gemini / Ollama...). Recommend Z.ai ($12.6/mo flat).
-- **Project Access Token** (PAT) cho bot — KHÔNG dùng `CI_JOB_TOKEN` (xem [§3.2](#32-tạo-token)).
+- **Token** cho bot (Personal Access Token = mọi tier; Project Access Token = Premium+/Self-managed) — KHÔNG dùng `CI_JOB_TOKEN` (xem [§3.2](#32-tạo-token)).
 
 ## 3. Setup
 
@@ -53,41 +53,39 @@ ephemeral. CI native `needs:` đảm bảo review chỉ chạy sau khi CI pass.
 
 | Bước | Làm gì | Ở đâu |
 |---|---|---|
-| 1 | Tạo Project Access Token | Project → Settings → Access Tokens |
-| 2 | Add bot làm Approval Rule approver | Project → Settings → Merge requests |
+| 1 | Tạo token (PAT mọi tier / Project Access Token Premium+) | Settings → Access Tokens |
+| 2 | Merge gate (protected branch “Pipelines must succeed”) | Settings → Repository → Protected branches |
 | 3 | Set CI/CD Variables (token + LLM key) | Project → Settings → CI/CD → Variables |
 | 4 | Include CI template (Component hoặc raw) | `.gitlab-ci.yml` |
 | 5 | (Optional) `.pi/config.yaml` | repo project |
 
-### 3.2 Tạo token
+### 3.2 Tạo token (bot identity)
+
+Tier-aware (xem [CI_SETUP §1](CI_SETUP.md) chi tiết):
+
+- **GitLab.com Free**: **Personal Access Token** (User Settings → Access Tokens,
+  scope `api`) từ tài khoản bot/dịch vụ. Add user đó làm direct member project (Developer).
+- **Premium+ / Self-Managed**: **Project Access Token** (Project → Settings → Access
+  Tokens, Role Developer, scope `api`) — tự tạo bot user direct member.
+
+> ⚠️ **`CI_JOB_TOKEN` KHÔNG dùng được** — chỉ đọc MR endpoints, không approve/note
+> (fine-grained GA 18.3 restrict thêm). Runtime guard: `GITLAB_API_TOKEN === CI_JOB_TOKEN`
+> → job fail ngay.
+
+### 3.3 Merge gate (block merge đến khi bot pass)
+
+**Cách 1 (mọi tier, KHUYẾN NGHỊ)** — protected branch “Pipelines must succeed”:
 
 ```
-Project → Settings → Access Tokens
-  Name: pi-reviewer-bot
-  Role: Developer (cần quyền approve)
-  Scopes: ✅ api
-  → Create → copy glpat-...
+Project → Settings → Repository → Protected branches → main
+  Allowed to merge: Maintainers
+  ☑ Pipelines must succeed
 ```
 
-> ⚠️ **`CI_JOB_TOKEN` KHÔNG dùng được.** Job token chỉ đọc được MR endpoints, không
-> approve/note được. Bot có runtime guard: nếu `GITLAB_API_TOKEN === CI_JOB_TOKEN` →
-> job fail ngay với message rõ. Phải dùng **Project Access Token** hoặc **user PAT**.
+`pi-review` exit 1 → pipeline fail → merge blocked. CI-native, không cần Approval Rule.
 
-**Alternatives**: user PAT (service account) cũng OK, miễn scope `api` + role approver.
-
-### 3.3 Add Approval Rule (để block merge)
-
-```
-Project → Settings → Merge requests → Approval rules
-  Add rule:
-    Name: Require bot review
-    Approvals required: 1
-    Approvers: @pi-reviewer-bot  (account sở hữu PAT)
-```
-
-Bot gọi `unapprove`/`approve` qua API → merge blocked cho đến khi bot approve.
-
-> Bỏ qua bước này nếu KHÔNG muốn bot block merge (chỉ muốn comment).
+**Cách 2 (Premium+, tùy chọn)** — Approval Rule require bot
+(xem [CI_SETUP §2](CI_SETUP.md)). Bot `unapprove`/`approve` qua API (`block.enabled: true`).
 
 ### 3.4 Set CI/CD Variables
 
@@ -293,7 +291,7 @@ Bot validate line qua GitLab API position hash. Nếu rebase làm diff shift →
 Project đang dùng webhook (pre-1.0):
 
 1. **Xóa webhook** trong Project Settings → Webhooks (MR + Pipeline events).
-2. **Add CI template** (§3.5) + set CI/CD Variables (§3.4) + Approval Rule (§3.3).
+2. **Add CI template** (§3.5) + set CI/CD Variables (§3.4) + merge gate (§3.3).
 3. **Bỏ `ci.*`** khỏi `.pi/config.yaml` (nếu có) — bot ignore + warn.
 4. **Bỏ env cũ** (nếu set): `WEBHOOK_SECRET`, `PORT`, `CI_WAIT_TIMEOUT_MS`,
    `MAX_CONCURRENT_REVIEWS`, `PER_PROJECT_COOLDOWN_MS`, `STATS_AUTH_TOKEN`.
