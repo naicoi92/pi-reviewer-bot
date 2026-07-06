@@ -187,104 +187,164 @@ export interface PiReviewResult extends ReviewResult {
 	toolState: ReviewToolState;
 }
 
-/** Số session attempt tối đa (1 lần đầu + retry). Cover stream crash + verdict miss. */
+/**
+ * D19 — 2 cơ chế phòng thủ verdict:
+ *   1. Session retry (MAX_SESSION_RETRIES): session crash (stream/JSON/network) →
+ *      fresh session, review lại từ đầu (mất context nhưng tiếp tục được).
+ *   2. Verdict remind (MAX_VERDICT_REMINDS): cùng session, AI end turn chưa verdict →
+ *      nhắc trong cùng context (rẻ ~5s vs retry ~3min).
+ *
+ * BUG gốc (MR !15): AI burn budget vào web_search/tool calls, end turn mà chưa gọi
+ * approve_mr/request_changes → outcome=inconclusive → job FAIL → user re-run pipeline.
+ */
 const MAX_SESSION_RETRIES = 2;
-/** Số lần nhắc AI trong cùng session khi kết thúc turn mà chưa verdict. */
 const MAX_VERDICT_REMINDS = 2;
 
+export { MAX_SESSION_RETRIES, MAX_VERDICT_REMINDS };
+
 /**
- * Reminder gửi khi AI end turn mà chưa gọi approve_mr/request_changes.
- * Include state hiện tại để AI biết bước tiếp theo cụ thể (chưa post_summary hay chưa verdict).
+ * Build verdict reminder include state — AI biết bước tiếp.
+ * Giữ context (cùng session), rẻ hơn retry ~3min (setup session + re-read diff).
  */
-function buildVerdictReminder(state: ReviewToolState): string {
-	const summaryStatus = state.summaryPosted ? "đã post ✅" : "CHƯA post ⚠️";
-	return [
-		`Bạn đã kết thúc lượt review nhưng CHƯA ra verdict chính thức.`,
-		``,
-		`Trạng thái:`,
-		`  - post_summary: ${summaryStatus}`,
-		`  - critical inline comments: ${state.criticalCount}`,
-		``,
-		`Bắt buộc làm theo đúng thứ tự:`,
-		state.summaryPosted
-			? `1. Gọi ĐÚNG MỘT: approve_mr(rationale) nếu criticalCount === 0, HOẶC request_changes(reason) nếu còn critical.`
-			: `1. Gọi post_summary(markdown) với verdict tổng quan.\n2. Sau đó gọi approve_mr HOẶC request_changes.`,
-		``,
-		`KHÔNG review lại diff. KHÔNG comment inline thêm. Chỉ hoàn thành verdict.`,
-	].join("\n");
-}
+export function buildVerdictReminder(state: ReviewToolState): string {
+	const parts: string[] = [
+		"You have not issued a verdict yet. The review MUST end with a verdict.",
+		"",
+		"Current state:",
+		`- summary posted: ${state.summaryPosted ? "yes" : "NO"}`,
+		`- critical comments: ${state.criticalCount}`,
+		`- inline comments posted: ${state.inlineCommentsPosted}`,
+	];
 
-/** Note thêm vào review prompt khi retry session (AI biết đây là lần thử lại). */
-function retryNote(attempt: number): string {
-	return [
-		``,
-		`---`,
-		`[RETRY ${attempt + 1}/${MAX_SESSION_RETRIES}: Lần trước không ra verdict hoặc bị lỗi stream. Review gọn, gọi approve_mr hoặc request_changes ngay sau post_summary.]`,
-	].join("\n");
-}
-
-/** Setup cố định dùng chung cho mọi session attempt (model, prompt, resourceLoader). */
-interface SessionSetup {
-	reviewPrompt: string;
-	resolvedModel?: ReturnType<typeof getBuiltinModel>;
-	timeoutMs: number;
-	resourceLoader: DefaultResourceLoader;
+	if (!state.summaryPosted) {
+		parts.push(
+			"",
+			"Next step: call post_summary(markdown) with your overall assessment NOW.",
+		);
+	} else if (state.criticalCount > 0) {
+		parts.push(
+			"",
+			`Next step: call request_changes(reason) — ${state.criticalCount} critical issue(s) block approval.`,
+		);
+	} else {
+		parts.push(
+			"",
+			"Next step: call approve_mr(rationale) — summary posted, 0 critical.",
+		);
+	}
+	parts.push("", "Do NOT call any other tool. Issue the verdict immediately.");
+	return parts.join("\n");
 }
 
 /**
- * Chạy 1 session attempt: tạo session → remind loop (turn-level) → cleanup.
- *
- * Fresh toolState + tools mỗi attempt (review context reset hoàn toàn).
- * Trong session: nếu AI end turn mà chưa verdict → nhắc (MAX_VERDICT_REMINDS lần).
+ * Resolve model + validate format. Return resolved model hoặc error string.
+ * Empty modelId → undefined (Pi auto-pick from auth).
  */
-async function runSessionAttempt(
-	setup: SessionSetup,
-	opts: {
-		ctx: MrContext;
-		repoDir: string;
-		diffEntries: MergeRequestDiffEntry[];
-		maxToolCalls?: number;
-	},
-	attempt: number,
-): Promise<PiReviewResult> {
-	const startedAt = Date.now();
+function resolveModel(
+	modelId: string,
+):
+	| { ok: true; model?: ReturnType<typeof getBuiltinModel> }
+	| { ok: false; error: string } {
+	if (!modelId) return { ok: true }; // Pi auto-pick
+	const slashIdx = modelId.indexOf("/");
+	if (slashIdx <= 0) {
+		return {
+			ok: false,
+			error: `Invalid model '${modelId}'. Expected format 'provider/model' e.g. 'zai/glm-5.2', 'openai/gpt-4o'.`,
+		};
+	}
+	const provider = modelId.slice(0, slashIdx);
+	const model = modelId.slice(slashIdx + 1);
+	try {
+		return {
+			ok: true,
+			model: getBuiltinModel(provider as never, model as never),
+		};
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		return {
+			ok: false,
+			error: `Model '${modelId}' not found. Run 'pi --list-models' to see available. Original: ${msg}`,
+		};
+	}
+}
 
-	// Fresh toolState + tools per attempt (review context reset hoàn toàn)
-	const toolState = createInitialToolState();
-	const toolCtx = {
-		mrContext: opts.ctx,
-		repoDir: opts.repoDir,
-		diffEntries: opts.diffEntries,
-		state: toolState,
-		maxToolCalls: opts.maxToolCalls ?? 30,
-	};
-	const tools: ToolDefinition<any, any, any>[] = createReviewTools(toolCtx);
-	const toolNames = tools.map((t) => t.name);
-
-	// Build sessionOpts: base config + fresh tools allowlist + model
-	// `noTools: "all"` disable built-in; `tools: toolNames` expose customTools cho AI.
-	const sessionOpts = {
+/**
+ * Build session options (once per review — reused across retries).
+ * Tools + state persist across retry attempts (approve/comment idempotent).
+ */
+async function buildSessionOpts(opts: {
+	repoDir: string;
+	model?: ReturnType<typeof getBuiltinModel>;
+	tools: ToolDefinition<any, any, any>[];
+}): Promise<Parameters<typeof createAgentSession>[0]> {
+	const toolNames = opts.tools.map((t) => t.name);
+	// IMPORTANT: dùng `tools: [...]` allowlist để Pi expose customTools cho AI.
+	// `noTools: "all"` disable built-in NHƯNG cũng làm Pi không register customTools
+	// vào active tool list → AI không thấy tools (verified empirical).
+	let sessionOpts: Record<string, unknown> = {
 		cwd: opts.repoDir,
 		agentDir: PI_AGENT_DIR,
-		noTools: "all" as const,
-		tools: toolNames,
-		customTools: tools,
+		noTools: "all", // disable built-in read/bash/edit/write
+		tools: toolNames, // expose custom tools (critical — without this AI sees no tools)
+		customTools: opts.tools,
 		sessionManager: SessionManager.inMemory(opts.repoDir),
-		resourceLoader: setup.resourceLoader,
-		...(setup.resolvedModel ? { model: setup.resolvedModel } : {}),
 	};
+	if (opts.model) sessionOpts = { ...sessionOpts, model: opts.model };
 
-	const { session } = await createAgentSession(
-		sessionOpts as Parameters<typeof createAgentSession>[0],
+	// Build ResourceLoader để inject base prompt + project rules (bot-controlled).
+	const basePrompt = await loadBasePrompt();
+	const projectRules = await loadProjectRules(opts.repoDir);
+	const appendSystemPrompt = projectRules ? [projectRules] : [];
+	console.log(
+		`[pi] system prompt: base=${basePrompt.length} chars, project append=${projectRules ? projectRules.length : 0} chars`,
 	);
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: opts.repoDir,
+		agentDir: PI_AGENT_DIR,
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		systemPrompt: basePrompt,
+		appendSystemPrompt,
+	});
+	await resourceLoader.reload();
+	sessionOpts = { ...sessionOpts, resourceLoader };
+	return sessionOpts as Parameters<typeof createAgentSession>[0];
+}
+
+/**
+ * Outcome của 1 session attempt (review hoặc remind).
+ *   verdict=true → AI đã gọi approve_mr/request_changes.
+ *   verdict=false → AI end turn chưa verdict (cần remind hoặc retry).
+ */
+interface AttemptOutcome {
+	verdict: boolean;
+	error?: string; // session crash (stream/JSON/network) → trigger retry
+	markdown: string;
+	events: AgentSessionEvent[];
+}
+
+/**
+ * Run 1 session: create → prompt → wait agent_end → remind loop → dispose.
+ *
+ * Remind loop (MAX_VERDICT_REMINDS): nếu AI end turn chưa verdict (state.approved &&
+ * state.changesRequested đều false), re-prompt verdict reminder trong cùng session.
+ * Rẻ (~5s) vs retry (~3min setup session mới).
+ */
+async function runSessionAttempt(args: {
+	sessionOpts: Parameters<typeof createAgentSession>[0];
+	state: ReviewToolState;
+	initialPrompt: string;
+	timeoutMs: number;
+	attempt: number;
+}): Promise<AttemptOutcome> {
+	const { sessionOpts, state, initialPrompt, timeoutMs, attempt } = args;
+	const { session } = await createAgentSession(sessionOpts);
 
 	let markdown = "";
 	const events: AgentSessionEvent[] = [];
-	let agentError: string | undefined;
-
-	// Mutable turn-end resolver — reset mỗi turn (multi-turn trong cùng session).
-	let resolveTurnEnd: (() => void) | null = null;
-	let rejectTurnEnd: ((e: Error) => void) | null = null;
 
 	const unsubscribe = session.subscribe((evt: AgentSessionEvent) => {
 		events.push(evt);
@@ -294,7 +354,7 @@ async function runSessionAttempt(
 				(evt as { name?: string; toolName?: string }).name ??
 				(evt as { toolName?: string }).toolName ??
 				"unknown";
-			console.log(`[pi] tool call: ${toolName}`);
+			console.log(`[pi] (attempt ${attempt}) tool call: ${toolName}`);
 		}
 		if (
 			t === "message_end" &&
@@ -308,102 +368,77 @@ async function runSessionAttempt(
 				}
 			}
 		}
-		if (t === "agent_end") resolveTurnEnd?.();
-		if (t === "error") {
-			const errMsg =
-				(evt as { error?: string; message?: string }).error ??
-				(evt as { message?: string }).message ??
-				"session error";
-			rejectTurnEnd?.(new Error(errMsg));
-		}
 	});
 
-	// Hard timeout per session (không phải per-turn).
-	const timeoutHandle = setTimeout(() => {
-		const msg = `review session exceeded ${setup.timeoutMs}ms`;
-		console.warn(`[pi] ${msg} — aborting session`);
-		session.abort().catch(() => void 0);
-		rejectTurnEnd?.(new Error(msg));
-	}, setup.timeoutMs);
+	const verdictIssued = () => state.approved || state.changesRequested;
 
 	try {
-		for (let turn = 0; turn <= MAX_VERDICT_REMINDS; turn++) {
-			// Reset turn-end promise cho turn này
-			const turnEnded = new Promise<void>((resolve, reject) => {
-				resolveTurnEnd = resolve;
-				rejectTurnEnd = reject;
-			});
+		// Turn 1: full review prompt.
+		await runOneTurn(session, initialPrompt, timeoutMs);
+		if (verdictIssued()) return { verdict: true, markdown, events };
 
-			const promptText =
-				turn === 0
-					? attempt === 0
-						? setup.reviewPrompt
-						: setup.reviewPrompt + retryNote(attempt)
-					: buildVerdictReminder(toolState);
-
-			console.log(
-				`[pi] attempt ${attempt + 1}/${MAX_SESSION_RETRIES} turn ${turn + 1} — ${turn === 0 ? "review" : "verdict remind"}`,
+		// Remind loop: same session, cheaper than retry (~5s vs ~3min).
+		for (let remind = 1; remind <= MAX_VERDICT_REMINDS; remind++) {
+			console.warn(
+				`[pi] (attempt ${attempt}) verdict remind ${remind}/${MAX_VERDICT_REMINDS} — AI ended turn without verdict`,
 			);
-
-			// session.prompt queue input; await turn end (agent_end hoặc error event).
-			await session.prompt(promptText);
-			await turnEnded;
-
-			// Đã verdict?
-			if (toolState.approved || toolState.changesRequested) {
-				console.log(
-					`[pi] verdict: ${toolState.approved ? "approved" : "changes_requested"} (attempt ${attempt + 1}, turn ${turn + 1})`,
-				);
-				break;
-			}
-
-			// Chưa verdict — nhắc nếu còn budget turn
-			if (turn < MAX_VERDICT_REMINDS) {
-				console.warn(`[pi] no verdict after turn ${turn + 1} — reminding AI`);
+			await runOneTurn(session, buildVerdictReminder(state), timeoutMs);
+			if (verdictIssued()) {
+				console.log(`[pi] (attempt ${attempt}) verdict after remind ${remind}`);
+				return { verdict: true, markdown, events };
 			}
 		}
+		return { verdict: false, markdown, events };
 	} catch (err) {
-		agentError = err instanceof Error ? err.message : String(err);
-		console.warn(`[pi] session attempt ${attempt + 1} error: ${agentError}`);
+		const error = err instanceof Error ? err.message : String(err);
+		console.warn(`[pi] (attempt ${attempt}) session error: ${error}`);
+		return { verdict: false, error, markdown, events };
 	} finally {
-		clearTimeout(timeoutHandle);
 		unsubscribe();
 		session.dispose();
 	}
-
-	const durationMs = Date.now() - startedAt;
-	if (agentError) {
-		return {
-			ok: false,
-			markdown,
-			eventCount: events.length,
-			error: agentError,
-			durationMs,
-			toolState,
-		};
-	}
-	return {
-		ok: true,
-		markdown,
-		eventCount: events.length,
-		durationMs,
-		toolState,
-	};
 }
 
 /**
- * Run a review với retry + verdict remind.
+ * Run 1 turn: prompt + wait agent_end (no polling). Abort on timeout.
+ * session.prompt resolves khi input queued, KHÔNG phải khi agent done →
+ * race prompt() vs agentEnded promise để detect hang.
+ */
+async function runOneTurn(
+	session: Awaited<ReturnType<typeof createAgentSession>>["session"],
+	text: string,
+	timeoutMs: number,
+): Promise<void> {
+	let resolveEnd!: () => void;
+	let rejectEnd!: (e: Error) => void;
+	const ended = new Promise<void>((resolve, reject) => {
+		resolveEnd = resolve;
+		rejectEnd = reject;
+	});
+
+	const unsub = session.subscribe((evt: AgentSessionEvent) => {
+		if ((evt.type as string) === "agent_end") resolveEnd();
+	});
+
+	const handle = setTimeout(() => {
+		console.warn(`[pi] turn exceeded ${timeoutMs}ms — aborting`);
+		session.abort().catch(() => void 0);
+		rejectEnd(new Error(`review exceeded ${timeoutMs}ms`));
+	}, timeoutMs);
+
+	try {
+		await Promise.race([session.prompt(text).then(() => ended), ended]);
+	} finally {
+		clearTimeout(handle);
+		unsub();
+	}
+}
+
+/**
+ * Run a review with Pi SDK in-process, with session retry + verdict remind (D19).
  *
- * 2 cơ chế phòng thủ:
- *   1. Session retry (MAX_SESSION_RETRIES): nếu session crash (stream error,
- *      JSON parse, network) → tạo fresh session, review lại từ đầu.
- *   2. Verdict remind (MAX_VERDICT_REMINDS): trong cùng session, nếu AI end turn
- *      mà chưa gọi approve_mr/request_changes → nhắc AI verdict (giữ context).
- *
- * Model resolution:
- *   opts.model (from .pi/config.yaml llm.model) > Pi auto-detect
- *   Format: "provider/model" e.g. "zai/glm-5.2", "openai/gpt-4o".
- *   Empty/undefined → Pi picks first available provider from auth.
+ * Model resolution: opts.model (from .pi/config.yaml llm.model) > Pi auto-detect.
+ * Format: "provider/model" e.g. "zai/glm-5.2", "openai/gpt-4o", "deepseek/deepseek-chat".
  */
 export async function runPiReview(opts: {
 	ctx: MrContext;
@@ -413,106 +448,107 @@ export async function runPiReview(opts: {
 	model?: string;
 	/** Max tool calls (purged từ env — từ cfg.review.limits.maxToolCalls). */
 	maxToolCalls?: number;
-	/** Review timeout ms per session (purged từ env — từ cfg.review.limits.timeoutMs). */
+	/** Review timeout ms per turn (purged từ env — từ cfg.review.limits.timeoutMs). */
 	timeoutMs?: number;
 }): Promise<PiReviewResult> {
 	const startedAt = Date.now();
-	const modelId = opts.model ?? "";
+	const timeoutMs = opts.timeoutMs ?? 15 * 60 * 1000;
 
-	// === SETUP (chạy 1 lần, reuse cho mọi attempt) ===
-
-	// Resolve model
-	let resolvedModel: ReturnType<typeof getBuiltinModel> | undefined;
-	if (modelId) {
-		const slashIdx = modelId.indexOf("/");
-		if (slashIdx <= 0) {
-			return {
-				ok: false,
-				markdown: "",
-				eventCount: 0,
-				error: `Invalid model '${modelId}'. Expected format 'provider/model' e.g. 'zai/glm-5.2', 'openai/gpt-4o'.`,
-				durationMs: Date.now() - startedAt,
-				toolState: createInitialToolState(),
-			};
-		}
-		const provider = modelId.slice(0, slashIdx);
-		const model = modelId.slice(slashIdx + 1);
-		try {
-			resolvedModel = getBuiltinModel(provider as never, model as never);
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return {
-				ok: false,
-				markdown: "",
-				eventCount: 0,
-				error: `Model '${modelId}' not found. Run 'pi --list-models' to see available. Original: ${msg}`,
-				durationMs: Date.now() - startedAt,
-				toolState: createInitialToolState(),
-			};
-		}
+	// Validate model up-front (fail fast, no retry).
+	const resolved = resolveModel(opts.model ?? "");
+	if (!resolved.ok) {
+		return {
+			ok: false,
+			markdown: "",
+			eventCount: 0,
+			error: resolved.error,
+			durationMs: Date.now() - startedAt,
+			toolState: createInitialToolState(),
+		};
 	}
 
+	// Tool state — shared across all attempts (tools idempotent: post_summary/approve re-post OK).
+	const toolState = createInitialToolState();
+	const toolCtx = {
+		mrContext: opts.ctx,
+		repoDir: opts.repoDir,
+		diffEntries: opts.diffEntries,
+		state: toolState,
+		maxToolCalls: opts.maxToolCalls ?? 30,
+	};
+	const tools = createReviewTools(toolCtx);
+
+	// Ensure agent dir exists (Pi writes settings/auth cache here) BEFORE creating session.
 	await mkdir(PI_AGENT_DIR, { recursive: true });
 
-	const basePrompt = await loadBasePrompt();
-	const projectRules = await loadProjectRules(opts.repoDir);
-	console.log(
-		`[pi] system prompt: base=${basePrompt.length} chars, project append=${projectRules ? projectRules.length : 0} chars`,
-	);
-
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: opts.repoDir,
-		agentDir: PI_AGENT_DIR,
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		systemPrompt: basePrompt,
-		appendSystemPrompt: projectRules ? [projectRules] : [],
+	const sessionOpts = await buildSessionOpts({
+		repoDir: opts.repoDir,
+		model: resolved.model,
+		tools,
 	});
-	await resourceLoader.reload();
+	const initialPrompt = buildPrompt({
+		ctx: opts.ctx,
+		diffEntries: opts.diffEntries,
+	});
 
-	const setup: SessionSetup = {
-		reviewPrompt: buildPrompt({ ctx: opts.ctx, diffEntries: opts.diffEntries }),
-		resolvedModel,
-		timeoutMs: opts.timeoutMs ?? 15 * 60 * 1000,
-		resourceLoader,
-	};
+	let allMarkdown = "";
+	let allEvents: AgentSessionEvent[] = [];
+	let lastError: string | undefined;
 
-	// === RETRY LOOP ===
-	let lastResult: PiReviewResult | undefined;
-	let totalEvents = 0;
+	// Retry loop: session crash (error) → fresh session, review lại từ đầu.
+	// verdict=false (AI not crash, just not verdict) → KHÔNG retry (remind đã thử trong attempt).
+	for (let attempt = 1; attempt <= MAX_SESSION_RETRIES + 1; attempt++) {
+		console.log(`[pi] session attempt ${attempt}/${MAX_SESSION_RETRIES + 1}`);
+		const outcome = await runSessionAttempt({
+			sessionOpts,
+			state: toolState,
+			initialPrompt,
+			timeoutMs,
+			attempt,
+		});
+		allMarkdown += outcome.markdown;
+		allEvents = allEvents.concat(outcome.events);
 
-	for (let attempt = 0; attempt < MAX_SESSION_RETRIES; attempt++) {
-		const result = await runSessionAttempt(setup, opts, attempt);
-		lastResult = result;
-		totalEvents += result.eventCount;
-
-		const verdict =
-			result.toolState.approved || result.toolState.changesRequested;
-		if (result.ok && verdict) {
-			// Success — return với total event count + total duration
+		if (outcome.verdict) {
 			return {
-				...result,
-				eventCount: totalEvents,
+				ok: true,
+				markdown: allMarkdown,
+				eventCount: allEvents.length,
 				durationMs: Date.now() - startedAt,
+				toolState,
 			};
 		}
 
-		if (attempt < MAX_SESSION_RETRIES - 1) {
-			const reason = result.ok
-				? "no verdict after reminds"
-				: `error: ${result.error}`;
+		if (outcome.error) {
+			// Session crash → retry fresh session (lose context but continue).
+			lastError = outcome.error;
+			if (attempt <= MAX_SESSION_RETRIES) {
+				console.warn(
+					`[pi] attempt ${attempt} crashed (${outcome.error}) — retrying`,
+				);
+			}
+		} else {
+			// AI not crash, just not verdict after remind loop → không retry (waste).
 			console.warn(
-				`[pi] attempt ${attempt + 1}/${MAX_SESSION_RETRIES} failed (${reason}) — retrying with fresh session`,
+				`[pi] attempt ${attempt} no verdict after ${MAX_VERDICT_REMINDS} reminds — giving up`,
 			);
+			return {
+				ok: true, // session ran OK, just no verdict → inconclusive (not error)
+				markdown: allMarkdown,
+				eventCount: allEvents.length,
+				durationMs: Date.now() - startedAt,
+				toolState,
+			};
 		}
 	}
 
-	// All attempts exhausted — inconclusive (no verdict) hoặc error
+	// All session attempts crashed.
 	return {
-		...lastResult!,
-		eventCount: totalEvents,
+		ok: false,
+		markdown: allMarkdown,
+		eventCount: allEvents.length,
+		error: lastError ?? "all session attempts failed",
 		durationMs: Date.now() - startedAt,
+		toolState,
 	};
 }

@@ -10,7 +10,12 @@
 
 import type { MrContext } from "./gitlab.ts";
 import { fetchMr, fetchMrDiff, postMrNote, unapproveMr } from "./gitlab.ts";
-import { runPiReview, type PiReviewResult } from "./pi.ts";
+import {
+	runPiReview,
+	MAX_SESSION_RETRIES,
+	MAX_VERDICT_REMINDS,
+	type PiReviewResult,
+} from "./pi.ts";
 import type { ProjectConfig } from "./config.ts";
 import { repoDir } from "./context.ts";
 
@@ -130,8 +135,8 @@ export async function performReview(
 			if (cfg.block.enabled) await unapproveMr(ctx).catch(() => void 0);
 			const body =
 				outcome.reason === "inconclusive"
-					? `## ⚠️ Review inconclusive\n\nBot finished review but did not issue a verdict.\n\n**Summary:** ${result.toolState.summaryText || "(no summary posted)"}\n\n_Inconclusive review blocks merge. Re-run pipeline, or manually approve to override._`
-					: `## 🤖 Review failed\n\n⚠️ **Bot error:** ${outcome.detail ?? "unknown"}\n\n_Merge blocked until bot succeeds. Re-run pipeline, or manually approve to override._`;
+					? `## ⚠️ Review inconclusive\n\nBot finished review (after ${MAX_SESSION_RETRIES + 1} session retries + ${MAX_VERDICT_REMINDS} verdict reminds) but did not issue a verdict.\n\n**Summary:** ${result.toolState.summaryText || "(no summary posted)"}\n\n**Inline comments posted:** ${result.toolState.inlineCommentsPosted} (${result.toolState.criticalCount} critical). Đọc comments trong tab Changes để quyết định thủ công: merge nếu OK, hoặc fix + push lại nếu có critical chưa xử lý.\n\n_Inconclusive review blocks merge. Retry pi-review job, manually approve to override, hoặc push commit mới._`
+					: `## 🤖 Review failed\n\n⚠️ **Bot error:** ${outcome.detail ?? "unknown"}\n\n_Merge blocked until bot succeeds. Retry pi-review job, manually approve to override._`;
 			await postMrNote(ctx, body).catch(() => void 0);
 		}
 
