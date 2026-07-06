@@ -30,7 +30,7 @@ pi-review job (stage: review, ephemeral runner)
    ├─ Load .pi/config.yaml
    ├─ unapprove MR nếu block.enabled (revoke approval cũ)
    ├─ fetch diff qua GitLab API
-   ├─ AI reviewer chạy 12 tools → post inline comments + summary verdict
+   ├─ AI reviewer chạy 13 tools (fetch_file + fetch_urls hỗ trợ batch) → post inline comments + summary verdict
    └─ exit code → MR state (exit 1 = MR blocked)
 ```
 

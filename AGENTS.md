@@ -71,14 +71,14 @@ AI reviewer có 13 custom tools:
 
 ### Read (không mutate state)
 
-1. `fetch_file(path)` — đọc file verify context
+1. `fetch_file(paths)` — đọc NHIỀU file song song verify context (array preferred, string shorthand)
 2. `get_issue(iid)` — GitLab issue gốc + comments + linked MRs
 3. `list_mr_comments()` — existing comments (idempotent re-review)
 4. `list_mr_commits()` — commit history
 5. `list_wiki_pages()` — wiki slug discovery
 6. `get_wiki_page(slug)` — read wiki page
 7. `web_search(query, maxResults?)` — search internet (Exa 1 lần → DuckDuckGo fallback, D20)
-8. `fetch_urls(url|urls, timeoutMs?)` — read URL(s) → markdown (Readability + Jina fallback + SSRF DNS-resolve, D20)
+8. `fetch_urls(urls, timeoutMs?)` — read NHIỀU URL song song → markdown (array preferred, string shorthand; Readability + Jina fallback + SSRF DNS-resolve, D20)
 9. `get_search_content(responseId, urlIndex?)` — retrieve full content của fetch_urls result trước đó (D20)
 
 ### Write (mutate state + call GitLab API)

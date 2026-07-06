@@ -31,8 +31,9 @@ pi-review job (image bot, CI runner)
    ├─ Load .pi/config.yaml (cwd)
    ├─ unapprove MR nếu block.enabled (revoke approval cũ)
    ├─ fetch diff qua GitLab API
-   ├─ runPiReview: AI reviewer dùng 12 tools (fetch_file, web_search, post_inline_comment,
-   │              post_summary, approve_mr / request_changes, ...)
+   ├─ runPiReview: AI reviewer dùng 13 tools (fetch_file, web_search, fetch_urls,
+   │              post_summary, approve_mr / request_changes, ...) — fetch_file + fetch_urls
+   │              hỗ trợ batch (truyền array, đọc song song trong 1 call)
    ├─ derive outcome từ toolState
    └─ exit code → MR state (exit 1 = MR blocked)
 ```

@@ -53,12 +53,12 @@ Mở MR → pipeline chạy → `pi-review` job review → bot comment + approve
 
 ## Kiến trúc — Mức 3 Full Tool
 
-AI reviewer có **12 tools**, tự decide approve/request_changes (không parse verdict):
+AI reviewer có **13 tools**, tự decide approve/request_changes (không parse verdict):
 
 | Nhóm | Tools |
 |---|---|
 | **Read** | `fetch_file`, `get_issue`, `list_mr_comments`, `list_mr_commits`, `list_wiki_pages`, `get_wiki_page` |
-| **Web lookup** | `web_search`, `fetch_url` — tra version/API/CVE (SSRF guard) |
+| **Web lookup** | `web_search`, `fetch_urls`, `get_search_content` — tra version/API/CVE (SSRF guard) |
 | **Write** | `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` |
 
 Guardrail: `approve_mr` block nếu chưa `post_summary` hoặc còn critical unresolved.
