@@ -142,15 +142,80 @@ function authHeaders(): Record<string, string> {
 	};
 }
 
+/** Cache current user ID để check "bot đã approve chưa". */
+let cachedBotUserId: number | null | undefined;
+
+/**
+ * Lấy ID của user sở hữu API token (bot user). Cache kết quả.
+ * Trả null nếu không xác định được (token invalid / network fail).
+ */
+async function currentUserId(_ctx: MrContext): Promise<number | null> {
+	if (cachedBotUserId !== undefined) return cachedBotUserId;
+	try {
+		const res = await fetch(`${API_BASE}/user`, {
+			headers: authHeaders(),
+		});
+		if (!res.ok) {
+			cachedBotUserId = null;
+			return null;
+		}
+		const user = (await res.json()) as { id?: number };
+		cachedBotUserId = typeof user.id === "number" ? user.id : null;
+		return cachedBotUserId;
+	} catch {
+		cachedBotUserId = null;
+		return null;
+	}
+}
+
+/**
+ * Lấy approval state của MR: danh sách user ID đã approve.
+ * Dùng cho idempotency check (tránh approve lại MR đã approved → 401).
+ */
+async function fetchMrApprovalState(
+	ctx: MrContext,
+): Promise<{ ok: boolean; approvedBy: number[] }> {
+	try {
+		const res = await fetch(
+			`${API_BASE}/projects/${ctx.projectId}/merge_requests/${ctx.mrIid}/approvals`,
+			{ headers: authHeaders() },
+		);
+		if (!res.ok) return { ok: false, approvedBy: [] };
+		const data = (await res.json()) as {
+			approved_by?: { user: { id: number } }[];
+		};
+		return {
+			ok: true,
+			approvedBy: (data.approved_by ?? []).map((a) => a.user.id),
+		};
+	} catch {
+		return { ok: false, approvedBy: [] };
+	}
+}
+
 /**
  * Approve the MR. Optionally pin to a specific commit SHA so the
  * approval is invalidated automatically when new commits are pushed
  * (GitLab resets approvals on push by default for the bot too).
+ *
+ * Idempotent: nếu bot đã approve SHA này rồi (kiểm qua GET /approvals),
+ * trả ok=true ngay không gọi POST lại (GitLab trả 401 khi approve lại MR
+ * đã approved bởi cùng user — approve không idempotent).
  */
 export async function approveMr(
 	ctx: MrContext,
 	sha?: string,
 ): Promise<{ ok: boolean; error?: string }> {
+	// Check approval state trước — tránh 401 khi approve lại MR đã approved.
+	const state = await fetchMrApprovalState(ctx);
+	if (state.ok) {
+		const botId = await currentUserId(ctx);
+		const alreadyApproved = botId != null && state.approvedBy.includes(botId);
+		if (alreadyApproved) {
+			return { ok: true };
+		}
+	}
+
 	const url = `${API_BASE}/projects/${ctx.projectId}/merge_requests/${ctx.mrIid}/approve`;
 	const body = sha ? JSON.stringify({ sha }) : "{}";
 	const res = await fetch(url, {
@@ -166,20 +231,25 @@ export async function approveMr(
 }
 
 /**
- * Unapprove the MR (revokes any prior bot approval).
- * Idempotent: returns ok=true if there was no approval to remove.
+ * Unapprove the MR (revokes the current user's approval).
+ * Endpoint: POST /merge_requests/:iid/unapprove (KHÔNG phải DELETE /approve).
+ * Idempotent: 404/405 khi không có approval để gỡ → treat as success.
  */
 export async function unapproveMr(
 	ctx: MrContext,
 ): Promise<{ ok: boolean; error?: string }> {
-	const url = `${API_BASE}/projects/${ctx.projectId}/merge_requests/${ctx.mrIid}/approve`;
+	const url = `${API_BASE}/projects/${ctx.projectId}/merge_requests/${ctx.mrIid}/unapprove`;
 	const res = await fetch(url, {
-		method: "DELETE",
+		method: "POST",
 		headers: authHeaders(),
 	});
-	// 405 = no approval to remove (GitLab responds 405 Method Not Allowed
-	// for "no approval" in some versions; 404 in others). Treat as success.
-	if (!res.ok && res.status !== 405 && res.status !== 404) {
+	// 404/405 = không có approval để gỡ (GitLab version-dependent).
+	if (
+		!res.ok &&
+		res.status !== 404 &&
+		res.status !== 405 &&
+		res.status !== 409
+	) {
 		const errText = await res.text();
 		return { ok: false, error: `${res.status}: ${errText.slice(0, 200)}` };
 	}
