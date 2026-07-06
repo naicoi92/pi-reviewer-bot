@@ -17,6 +17,7 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { assertSafeUrl } from "../ssrf.ts";
+import { withTimeout } from "../http.ts";
 import type { ToolContext } from "./index.ts";
 import { ok, err } from "./result.ts";
 
@@ -93,11 +94,19 @@ async function searchExa(query: string, maxResults: number): Promise<SearchResul
   });
 
   if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
+    const body = await withTimeout(
+      resp.text().catch(() => ""),
+      FETCH_TIMEOUT_MS,
+      "exa error body",
+    );
     throw new Error(`Exa HTTP ${resp.status}: ${body.slice(0, 200)}`);
   }
 
-  const data = (await resp.json()) as {
+  const data = (await withTimeout(
+    resp.json(),
+    FETCH_TIMEOUT_MS,
+    "exa json",
+  )) as {
     results?: Array<{ title?: string; url?: string; text?: string; score?: number }>;
   };
   return (data.results ?? [])
@@ -136,7 +145,7 @@ async function searchDdg(query: string, maxResults: number): Promise<SearchResul
     throw new Error(`DDG HTTP ${resp.status}`);
   }
 
-  const html = await resp.text();
+  const html = await withTimeout(resp.text(), FETCH_TIMEOUT_MS, "ddg html");
   const results: SearchResult[] = [];
 
   // DDG HTML pattern (empirical 2024-2025):

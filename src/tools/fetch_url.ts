@@ -17,6 +17,7 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { assertSafeUrl } from "../ssrf.ts";
+import { withTimeout } from "../http.ts";
 import type { ToolContext } from "./index.ts";
 import { ok, err } from "./result.ts";
 
@@ -109,10 +110,16 @@ export function fetchUrlTool(_ctx: ToolContext) {
       const contentType = resp.headers.get("content-type") ?? "";
 
       // Stream-read với size cap — tránh load full body nếu huge
+      // Body read wrapped trong withTimeout: AbortSignal của fetch không abort
+      // tin cậy arrayBuffer() trong Bun (slowloris-style body hang).
       let raw: string;
       try {
         // Bun supports resp.text() — đọc full rồi slice. Pour performance post-MVP.
-        const buf = await resp.arrayBuffer();
+        const buf = await withTimeout(
+          resp.arrayBuffer(),
+          FETCH_TIMEOUT_MS,
+          "fetch_url body",
+        );
         const truncated = buf.byteLength > MAX_BYTES;
         const slice = truncated ? buf.slice(0, MAX_BYTES) : buf;
         raw = new TextDecoder("utf-8", { fatal: false }).decode(slice);
