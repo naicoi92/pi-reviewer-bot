@@ -96,16 +96,15 @@ export async function performReview(
 			return { ok: true, verdict: "skipped" };
 		}
 
-		// Revoke approval cũ (block=true) — MR blocked trong suốt review lại.
+		// Revoke approval cũ của bot ở đầu mỗi review. Phù hợp re-review sau fix:
+		// approval cũ (cho SHA trước) bị revoke, user/other approvals giữ nguyên.
 		// Idempotent: unapproveMr coi 404/405 (no approval) là success.
-		if (cfg.block.enabled) {
-			const r = await unapproveMr(ctx);
-			log(
-				r.ok
-					? "unapproved (block=true)"
-					: `warn — unapprove failed: ${r.error}`,
-			);
-		}
+		const r = await unapproveMr(ctx);
+		log(
+			r.ok
+				? "unapproved (start review)"
+				: `warn — unapprove failed: ${r.error}`,
+		);
 
 		const diffEntries = await fetchMrDiff(ctx);
 		log(`fetched ${diffEntries.length} file diffs`);
