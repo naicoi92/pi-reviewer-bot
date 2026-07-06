@@ -1,5 +1,5 @@
 /**
- * Tool registration tests — verify createReviewTools exposes đúng 12 tools.
+ * Tool registration tests — verify createReviewTools exposes đúng 13 tools.
  * Run: `bun test`
  */
 
@@ -33,16 +33,17 @@ function makeCtx(): ToolContext {
 }
 
 describe("createReviewTools registration", () => {
-	test("registers exactly 12 tools", () => {
+	test("registers exactly 13 tools", () => {
 		const tools = createReviewTools(makeCtx());
-		expect(tools.length).toBe(12);
+		expect(tools.length).toBe(13);
 	});
 
-	test("includes web_search + fetch_url", () => {
+	test("includes web_search + fetch_urls + get_search_content", () => {
 		const tools = createReviewTools(makeCtx());
 		const names = tools.map((t) => t.name).sort();
 		expect(names).toContain("web_search");
-		expect(names).toContain("fetch_url");
+		expect(names).toContain("fetch_urls");
+		expect(names).toContain("get_search_content");
 	});
 
 	test("tool set matches expected registry", () => {
@@ -56,7 +57,8 @@ describe("createReviewTools registration", () => {
 			"list_wiki_pages",
 			"get_wiki_page",
 			"web_search",
-			"fetch_url",
+			"fetch_urls",
+			"get_search_content",
 			// Write
 			"post_summary",
 			"post_inline_comment",

@@ -39,9 +39,9 @@ pi-reviewer-bot/
 │   ├── pi.ts                       # Pi SDK wrapper — createAgentSession + subscribe
 │   ├── config.ts                   # .pi/config.yaml loader + mergeConfig (drop ci.*, add limits)
 │   ├── stats.ts                    # emitStatsLine (stdout JSON)
-│   ├── ssrf.ts                     # SSRF guard cho fetch_url (block private IP + non-http protocols)
+│   ├── ssrf.ts                     # SSRF guard: assertSafeUrl (sync, web_search) + validateRemoteUrl/fetchRemoteUrl (DNS-resolve, fetch_urls)
 │   ├── types.ts                    # MR data types (webhook payload types removed)
-│   └── tools/                      # 12 custom tools (defineTool)
+│   └── tools/                      # 13 custom tools (defineTool)
 │       ├── index.ts                # tool factory + shared state
 │       ├── result.ts               # ok/err/done helpers (AgentToolResult shape)
 │       ├── fetch_file.ts           # read file (path traversal guard)
@@ -50,8 +50,9 @@ pi-reviewer-bot/
 │       ├── list_mr_commits.ts      # commit history
 │       ├── list_wiki_pages.ts      # wiki slug discovery
 │       ├── get_wiki_page.ts        # read wiki page (ADRs ngoài repo)
-│       ├── web_search.ts           # search internet (Exa hoặc DuckDuckGo) — dep/API/CVE verify
-│       ├── fetch_url.ts            # read URL content (Bun fetch + SSRF guard)
+│       ├── web_search.ts           # search internet (Exa 1 lần → DuckDuckGo) — dep/API/CVE verify
+│       ├── fetch_urls.ts           # read URL(s) → markdown (Readability + Jina fallback + SSRF DNS-resolve) D20
+│       ├── get_search_content.ts   # retrieve full content của fetch_urls result trước đó (D20)
 │       ├── post_summary.ts         # top-level verdict (BẮT BUỘC trước approve)
 │       ├── post_inline_comment.ts  # DiffNote với severity + line validation
 │       ├── approve_mr.ts           # approve (guardrail: summary + 0 critical)
@@ -64,9 +65,9 @@ pi-reviewer-bot/
     └── tools.test.ts               # tool registration tests
 ```
 
-## 12 Tools (Mức 3 Full Tool)
+## Tools (Mức 3 Full Tool)
 
-AI reviewer có 12 tools (chia 2 nhóm):
+AI reviewer có 13 custom tools:
 
 ### Read (không mutate state)
 
@@ -76,8 +77,9 @@ AI reviewer có 12 tools (chia 2 nhóm):
 4. `list_mr_commits()` — commit history
 5. `list_wiki_pages()` — wiki slug discovery
 6. `get_wiki_page(slug)` — read wiki page
-7. `web_search(query, maxResults?)` — search internet (dep version, API, CVE)
-8. `fetch_url(url)` — read URL content (sau web_search hoặc URL đã biết)
+7. `web_search(query, maxResults?)` — search internet (Exa 1 lần → DuckDuckGo fallback, D20)
+8. `fetch_urls(url|urls, timeoutMs?)` — read URL(s) → markdown (Readability + Jina fallback + SSRF DNS-resolve, D20)
+9. `get_search_content(responseId, urlIndex?)` — retrieve full content của fetch_urls result trước đó (D20)
 
 ### Write (mutate state + call GitLab API)
 
@@ -90,18 +92,24 @@ AI reviewer có 12 tools (chia 2 nhóm):
 
 ### Web Lookup — trigger-driven
 
-`web_search` + `fetch_url` cho phép AI verify dependency version mới nhất, API
-deprecation, CVE. **Default ON** (luôn available, không cần per-project opt-in).
+`web_search` (Exa→DDG) + `fetch_urls` (Readability + Jina fallback) cho phép AI
+verify dependency version mới nhất, API deprecation, CVE.
+**Default ON** (luôn available, không cần per-project opt-in).
 AI tự decide khi nào dùng dựa trên trigger trong system prompt (xem
 `agents/code-reviewer.md` "Web Lookup — Khi nào dùng"):
 
 - ✅ Trigger: version mismatch, outdated dep, API deprecated/sai signature, CVE concern
 - ❌ Skip: pure logic, style, obvious bugs, diff nhỏ
 - Budget: hard cap 5 web calls/review
-- Bun native `fetch()` (HTTP/2 auto), SSRF guard block private IP literals
+- Bun native `fetch()` (HTTP/2 auto), SSRF guard DNS-resolve + check public IP (block private IP, chống DNS-rebind)
 
-Optional `EXA_API_KEY` env để dùng Exa search (quality cao cho code docs); nếu
-không set → fallback DuckDuckGo (free, no key).
+`web_search` thử Exa 1 lần (nếu `EXA_API_KEY` set), fail (401/network) → cache
+`exaFailed` → dùng DuckDuckGo cho mọi call sau (D20, giảm 401 spam 4×→1×).
+DuckDuckGo = free, no key. `fetch_urls` extract markdown qua Readability
+(@mozilla/readability + linkedom + turndown), Jina Reader fallback (r.jina.ai,
+free, no key) cho SPA/JS-heavy page. Mọi result lưu → `get_search_content`
+retrieve lại (tránh re-fetch, tiết kiệm budget). KHÔNG dùng pi-web-access extension
+(build self-contained, D20).
 
 ## LLM Providers (Multi-provider)
 
@@ -226,6 +234,7 @@ Xem [`docs/CONFIG.md`](docs/CONFIG.md) cho schema đầy đủ.
 | D17 | **Webhook service → GitLab CI job (reverse D1)** | ciwait in-memory Map mất khi restart, SHA matching BUG 5 (3 sites khác nhau), bot online 24/7, inflight cancel phức tạp. CI native `needs:` + predefined env vars giải tất cả. Hard cutover + major bump. Config: purge env knobs (`DEFAULT_MODEL`/`MAX_TOOL_CALLS_PER_REVIEW`/`REVIEW_TIMEOUT_MS`) → `.pi/config.yaml` (`review.limits`, `llm.model`). Token = Project Access Token (không `CI_JOB_TOKEN`). |
 | D18 | `sourceSha`/`targetSha` resolve qua fallback (reverse D14/D17 strictness) | `CI_MERGE_REQUEST_*_BRANCH_SHA` empty trong detached/merged-result pipelines (known GitLab bug, xác nhận via `CI_MERGE_REQUEST_EVENT_TYPE=detached`). Resolve: `sourceSha = CI_MERGE_REQUEST_SOURCE_BRANCH_SHA ?? CI_COMMIT_SHA`; `targetSha = CI_MERGE_REQUEST_TARGET_BRANCH_SHA ?? CI_MERGE_REQUEST_DIFF_BASE_SHA`. `CI_COMMIT_SHA` thêm vào REQUIRED_ENV. Side benefit: DIFF_BASE_SHA (merge base) là `base_sha`/`start_sha` đúng hơn cho DiffNote position so với target HEAD. |
 | D19 | Retry session + verdict remind trong `pi.ts` (2 cơ chế phòng thủ verdict) | BUG: AI burn budget vào web_search/tool calls, end turn mà chưa gọi `approve_mr`/`request_changes` → `outcome=inconclusive` → job FAIL → user re-run pipeline (MR !15: 8312 events, 4 web_search, 215s, no verdict). Giải pháp: (1) **Session retry** `MAX_SESSION_RETRIES=2` — session crash (stream error, JSON parse, network) → fresh session, review lại. (2) **Verdict remind** `MAX_VERDICT_REMINDS=2` — cùng session, AI end turn chưa verdict → nhắc (giữ context, rẻ ~5s vs retry ~3min). `buildVerdictReminder(state)` include state (summaryPosted, criticalCount) → AI biết bước tiếp. Refactor `runPiReview`: setup once → retry loop → `runSessionAttempt` (remind loop). Loại text-parse verdict (lùi D3) — giữ tool-based. Inconclusive note text mới: báo attempts + remind đã thử, gợi ý user đọc inline comments quyết định thủ công (KHÔNG auto-derive verdict). |
+| D20 | web_search Exa-once + `fetch_urls` custom pipeline (Readability + Jina + SSRF DNS-resolve) | BUG MR !15: `EXA_API_KEY` invalid → mỗi `web_search` retry Exa → 4× 401 spam. Fix (1): cache `exaFailed` trong `ReviewToolState` — sau first fail, skip Exa (straight DDG). Fix (2): rewrite `fetch_url` → `fetch_urls` (custom pipeline, KHÔNG dùng pi-web-access extension). Pipeline: `validateRemoteUrl` (SSRF DNS-resolve + check public IP, chống DNS-rebind — fix known limitation) → `fetchRemoteUrl` (Bun native fetch HTTP/2, redirect re-validated) → Readability (`@mozilla/readability` + linkedom + turndown) → Jina Reader fallback (r.jina.ai, free, no key) cho SPA/JS-heavy. Multi-URL parallel (p-limit). Store MỌI result → `$PI_AGENT_DIR/fetch-cache/<responseId>.json` → `get_search_content(responseId, urlIndex?)` retrieve. Skip YouTube/PDF/Video/GitHub-clone/Gemini (cherry-pick 12 features). Drop pi-web-access dep, +readability/linkedom/turndown/p-limit, tsconfig +DOM lib. Rename tool `fetch_url` → `fetch_urls`. 13 tools (12 → 13). |
 
 Xem [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) cho decision chi tiết.
 
@@ -242,7 +251,7 @@ webhook skip log). CI native (`needs:` + predefined env vars) thay thế toàn b
 - ❌ Auto-fix commits
 - ❌ Pending CI wait mất khi bot restart (in-memory, không persist — user push commit retry)
 - ❌ Parent-child pipelines (downstream, `trigger:` keyword) không tracked — bot chỉ check parent pipeline status. Workaround: dùng `needs:` trong CI config để parent đợi child xong
-- ❌ Web tools SSRF chỉ check IP literal — không resolve DNS (DNS-rebind bypass possible). Acceptable risk cho code-review bot.
+- ❌ Web tools SSRF `assertSafeUrl` (web_search) chỉ check IP literal — không resolve DNS (DNS-rebind bypass possible). Acceptable: web_search URL DDG hard-coded public. **fetch_urls** dùng `validateRemoteUrl` (DNS-resolve + check) — đã fix gap này (D20).
 - ❌ Web tools không render JS (no headless browser) — SPA docs pages trả HTML trống không đọc được. Workaround: dùng sitemap hoặc trực tiếp MDN/GitHub raw.
 - ❌ Web search không cache — mỗi review re-fetch. Post-MVP: Redis/disk cache.
 

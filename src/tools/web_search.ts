@@ -212,14 +212,14 @@ async function searchDdg(
 	return results;
 }
 
-export function webSearchTool(_ctx: ToolContext) {
+export function webSearchTool(ctx: ToolContext) {
 	return defineTool({
 		name: "web_search",
 		label: "Web Search",
 		description:
 			"Search the internet for up-to-date information: package versions, API docs, CVEs, " +
 			"deprecation notices, breaking changes. Uses Exa if EXA_API_KEY set, else DuckDuckGo. " +
-			"Returns title + URL + snippet per result — call fetch_url on the most relevant to read full content.",
+			"Returns title + URL + snippet per result — call fetch_urls on the most relevant to read full content.",
 		promptSnippet:
 			"web_search(query, maxResults?): search internet. Trigger: dep version mismatch, " +
 			"outdated dependency, API deprecated/sai signature, CVE lookup.",
@@ -247,8 +247,9 @@ export function webSearchTool(_ctx: ToolContext) {
 				MAX_RESULTS_CAP,
 			);
 
-			// Try Exa first (if key configured), fallback DuckDuckGo
-			const useExa = Boolean(process.env.EXA_API_KEY);
+			// Try Exa first (if key configured + chưa fail lần nào), fallback DuckDuckGo.
+			// Sau first Exa failure → cache exaFailed=true → skip Exa cho mọi call sau (chống 401 spam).
+			const useExa = Boolean(process.env.EXA_API_KEY) && !ctx.state.exaFailed;
 			const results: SearchResult[] = [];
 			let backend: string;
 
@@ -257,10 +258,12 @@ export function webSearchTool(_ctx: ToolContext) {
 					results.push(...(await searchExa(query, maxResults)));
 					backend = "exa";
 				} catch (e) {
-					// Exa fail (rate limit, network, bad key) → fallback DDG transparent
+					// Exa fail (rate limit, network, bad key) → cache fail + fallback DDG transparent.
+					// Cache để các web_search call sau skip Exa luôn (giảm 401 spam 4×→1×).
+					ctx.state.exaFailed = true;
 					const msg = e instanceof Error ? e.message : String(e);
 					console.warn(
-						`[web_search] Exa failed (${msg}); falling back to DuckDuckGo`,
+						`[web_search] Exa failed (${msg}) — disabling Exa for rest of review, using DuckDuckGo`,
 					);
 					try {
 						results.push(...(await searchDdg(query, maxResults)));

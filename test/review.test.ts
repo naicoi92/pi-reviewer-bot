@@ -17,6 +17,7 @@ const baseState: ReviewToolState = {
 	summaryText: "",
 	changesReason: "",
 	inlineCommentsPosted: 0,
+	exaFailed: false,
 };
 
 function fakeResult(overrides: {

@@ -19,7 +19,8 @@ import { listMrCommitsTool } from "./list_mr_commits.ts";
 import { getWikiPageTool } from "./get_wiki_page.ts";
 import { listWikiPagesTool } from "./list_wiki_pages.ts";
 import { webSearchTool } from "./web_search.ts";
-import { fetchUrlTool } from "./fetch_url.ts";
+import { fetchUrlsTool } from "./fetch_urls.ts";
+import { getSearchContentTool } from "./get_search_content.ts";
 
 /**
  * Mutable state shared giữa các tools trong 1 review session.
@@ -42,6 +43,8 @@ export interface ReviewToolState {
 	changesReason: string;
 	/** Số inline comments đã post (cho stats). */
 	inlineCommentsPosted: number;
+	/** True sau khi Exa fail 1 lần — skip Exa cho mọi web_search call sau (dùng DDG). Giảm 401 spam. */
+	exaFailed: boolean;
 }
 
 export interface ToolContext {
@@ -63,6 +66,7 @@ export function createInitialToolState(): ReviewToolState {
 		summaryText: "",
 		changesReason: "",
 		inlineCommentsPosted: 0,
+		exaFailed: false,
 	};
 }
 
@@ -102,7 +106,8 @@ export function createReviewTools(ctx: ToolContext): AnyTool[] {
 		withCallCount(listWikiPagesTool(ctx), ctx),
 		withCallCount(getWikiPageTool(ctx), ctx),
 		withCallCount(webSearchTool(ctx), ctx),
-		withCallCount(fetchUrlTool(ctx), ctx),
+		withCallCount(fetchUrlsTool(ctx), ctx),
+		withCallCount(getSearchContentTool(ctx), ctx),
 		// Write tools (state mutation + GitLab API)
 		withCallCount(postSummaryTool(ctx), ctx),
 		withCallCount(postInlineCommentTool(ctx), ctx),
