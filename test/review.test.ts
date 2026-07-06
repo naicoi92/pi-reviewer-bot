@@ -76,10 +76,10 @@ describe("deriveOutcome — exit-code contract", () => {
 		).toEqual({ ok: true, verdict: "changes_requested" });
 	});
 
-	test("no verdict → inconclusive (job FAIL → MR blocked)", () => {
+	test("no verdict → inconclusive (job PASS, MR blocked vì unapproved)", () => {
 		expect(deriveOutcome(fakeResult({}))).toEqual({
-			ok: false,
-			reason: "inconclusive",
+			ok: true,
+			verdict: "inconclusive",
 		});
 	});
 

@@ -20,15 +20,22 @@ import type { ProjectConfig } from "./config.ts";
 import { repoDir } from "./context.ts";
 
 export type ReviewOutcome =
-	| { ok: true; verdict: "approved" | "changes_requested" | "skipped" }
-	| { ok: false; reason: "inconclusive" | "error"; detail?: string };
+	| {
+			ok: true;
+			verdict: "approved" | "changes_requested" | "skipped" | "inconclusive";
+	  }
+	| { ok: false; reason: "error"; detail?: string };
 
 /**
  * Derive ReviewOutcome từ PiReviewResult (pure, testable).
  *
  * Exit-code contract:
- *   approved / changes_requested → ok:true  (job PASS; changes_requested vẫn block MR — intentional)
- *   inconclusive / error         → ok:false (job FAIL → MR blocked, user re-run pipeline)
+ *   approved / changes_requested / inconclusive → ok:true  (job PASS)
+ *   error                                       → ok:false (job FAIL)
+ *
+ * inconclusive = AI không verdict (guardrail block approve_mr, hoặc burn budget).
+ * Job vẫn PASS (không spam CI fail) — MR blocked vì bot đã unapprove ở đầu
+ * review. User đọc inline comments, tự quyết: approve thủ công hoặc push fix.
  */
 export function deriveOutcome(result: PiReviewResult): ReviewOutcome {
 	if (!result.ok) {
@@ -37,7 +44,7 @@ export function deriveOutcome(result: PiReviewResult): ReviewOutcome {
 	const ts = result.toolState;
 	if (ts.approved) return { ok: true, verdict: "approved" };
 	if (ts.changesRequested) return { ok: true, verdict: "changes_requested" };
-	return { ok: false, reason: "inconclusive" };
+	return { ok: true, verdict: "inconclusive" };
 }
 
 /**
@@ -130,12 +137,15 @@ export async function performReview(
 
 		const outcome = deriveOutcome(result);
 
+		if (outcome.ok && outcome.verdict === "inconclusive") {
+			// Job PASS nhưng không verdict — post note cho user đọc, MR vẫn blocked (unapproved).
+			const body = `## ⚠️ Review inconclusive\n\nBot finished review (after ${MAX_SESSION_RETRIES + 1} session retries + ${MAX_VERDICT_REMINDS} verdict reminds) but did not issue a verdict.\n\n**Summary:** ${result.toolState.summaryText || "(no summary posted)"}\n\n**Inline comments posted:** ${result.toolState.inlineCommentsPosted} (${result.toolState.criticalCount} critical). Đọc comments trong tab Changes để quyết định thủ công: merge nếu OK, hoặc fix + push lại nếu có critical chưa xử lý.\n\n_Merge vẫn blocked (bot chưa approve). Approve thủ công nếu OK, hoặc push commit mới để bot re-review._`;
+			await postMrNote(ctx, body).catch(() => void 0);
+		}
+
 		if (!outcome.ok) {
 			if (cfg.block.enabled) await unapproveMr(ctx).catch(() => void 0);
-			const body =
-				outcome.reason === "inconclusive"
-					? `## ⚠️ Review inconclusive\n\nBot finished review (after ${MAX_SESSION_RETRIES + 1} session retries + ${MAX_VERDICT_REMINDS} verdict reminds) but did not issue a verdict.\n\n**Summary:** ${result.toolState.summaryText || "(no summary posted)"}\n\n**Inline comments posted:** ${result.toolState.inlineCommentsPosted} (${result.toolState.criticalCount} critical). Đọc comments trong tab Changes để quyết định thủ công: merge nếu OK, hoặc fix + push lại nếu có critical chưa xử lý.\n\n_Inconclusive review blocks merge. Retry pi-review job, manually approve to override, hoặc push commit mới._`
-					: `## 🤖 Review failed\n\n⚠️ **Bot error:** ${outcome.detail ?? "unknown"}\n\n_Merge blocked until bot succeeds. Retry pi-review job, manually approve to override._`;
+			const body = `## 🤖 Review failed\n\n⚠️ **Bot error:** ${outcome.detail ?? "unknown"}\n\n_Merge blocked until bot succeeds. Retry pi-review job, manually approve to override._`;
 			await postMrNote(ctx, body).catch(() => void 0);
 		}
 

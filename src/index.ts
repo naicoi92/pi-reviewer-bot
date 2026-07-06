@@ -6,8 +6,11 @@
  * `performReview` → `emitStatsLine` → exit code. Không còn HTTP server.
  *
  * Exit-code contract:
- *   0 = review ok (approved HOẶC changes_requested — intentional block, job vẫn pass)
- *   1 = review fail (error/inconclusive) → MR blocked, user re-run pipeline
+ *   0 = review ok (approved / changes_requested / inconclusive — job pass)
+ *   1 = review fail (error only) → MR blocked, user re-run pipeline
+ *
+ *   inconclusive = AI không verdict nhưng job pass — MR vẫn blocked vì bot
+ *   unapprove ở đầu review. User đọc comments, approve thủ công hoặc push fix.
  */
 
 import { mrContextFromEnv, repoDir } from "./context.ts";

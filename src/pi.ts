@@ -343,6 +343,13 @@ async function runSessionAttempt(args: {
 	const { sessionOpts, state, initialPrompt, timeoutMs, attempt } = args;
 	const { session } = await createAgentSession(sessionOpts);
 
+	// Force sequential tool execution. SDK default = "parallel" → guardrail race:
+	// khi AI gọi post_summary + approve_mr cùng batch, approve_mr check
+	// state.summaryPosted TRƯỚC khi post_summary set nó → block sai → remind loop
+	// vô tận → inconclusive (BUG MR !18).
+	(session as { agent?: { toolExecution: string } }).agent!.toolExecution =
+		"sequential";
+
 	let markdown = "";
 	const events: AgentSessionEvent[] = [];
 
@@ -355,6 +362,21 @@ async function runSessionAttempt(args: {
 				(evt as { toolName?: string }).toolName ??
 				"unknown";
 			console.log(`[pi] (attempt ${attempt}) tool call: ${toolName}`);
+		}
+		if (t === "tool_execution_end") {
+			const e = evt as {
+				toolName: string;
+				result?: { content?: Array<{ type: string; text?: string }> };
+				isError?: boolean;
+			};
+			const text = e.result?.content
+				?.filter((c) => c.type === "text")
+				.map((c) => c.text ?? "")
+				.join(" ")
+				.slice(0, 200);
+			console.log(
+				`[pi] (attempt ${attempt}) tool result ${e.toolName}${e.isError ? " [ERROR]" : ""}: ${text}`,
+			);
 		}
 		if (
 			t === "message_end" &&
