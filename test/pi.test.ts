@@ -7,6 +7,7 @@ import {
 	buildVerdictReminder,
 	MAX_SESSION_RETRIES,
 	MAX_VERDICT_REMINDS,
+	waitForStreamingIdle,
 } from "../src/pi.ts";
 import {
 	createInitialToolState,
@@ -59,5 +60,34 @@ describe("buildVerdictReminder — include state → next step", () => {
 		const r = buildVerdictReminder(createInitialToolState());
 		expect(r).toContain("Do NOT call any other tool");
 		expect(r).toContain("Issue the verdict immediately");
+	});
+});
+
+describe("waitForStreamingIdle — fix MR !17 race", () => {
+	test("returns immediately khi isStreaming=false", async () => {
+		const session = { isStreaming: false };
+		const start = Date.now();
+		await waitForStreamingIdle(session, 1000);
+		expect(Date.now() - start).toBeLessThan(50);
+	});
+
+	test("polls cho đến khi isStreaming=false", async () => {
+		let calls = 0;
+		const session = {
+			get isStreaming() {
+				calls++;
+				return calls < 3; // false ở lần check thứ 3
+			},
+		};
+		await waitForStreamingIdle(session, 2000);
+		expect(calls).toBeGreaterThanOrEqual(3);
+	});
+
+	test("throws timeout khi isStreaming stuck true", async () => {
+		const session = { isStreaming: true };
+		// ponytail: poll interval 100ms, timeout 250ms → ~2-3 checks
+		await expect(waitForStreamingIdle(session, 250)).rejects.toThrow(
+			"session still streaming",
+		);
 	});
 });

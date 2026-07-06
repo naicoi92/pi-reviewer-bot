@@ -400,9 +400,36 @@ async function runSessionAttempt(args: {
 }
 
 /**
- * Run 1 turn: prompt + wait agent_end (no polling). Abort on timeout.
+ * Đợi SDK sẵn sàng nhận prompt mới (isStreaming=false).
+ *
+ * BUG (MR !17): remind turn gọi session.prompt() ngay sau khi agent_end fire,
+ * nhưng SDK reset isStreaming *sau* khi emit agent_end (post-processing: flush
+ * tool results, cleanup state). Window này → prompt() throw
+ * "Agent is already processing". Poll isStreaming cho đến false để đóng gap.
+ */
+export async function waitForStreamingIdle(
+	session: { isStreaming: boolean },
+	timeoutMs = 10_000,
+): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (session.isStreaming) {
+		if (Date.now() >= deadline) {
+			throw new Error(
+				`session still streaming after ${timeoutMs}ms (isStreaming stuck)`,
+			);
+		}
+		await new Promise((r) => setTimeout(r, 100));
+	}
+}
+
+/**
+ * Run 1 turn: wait idle → prompt → wait agent_end. Abort on timeout.
+ *
  * session.prompt resolves khi input queued, KHÔNG phải khi agent done →
  * race prompt() vs agentEnded promise để detect hang.
+ *
+ * Defensive: dù đã wait idle, race window vẫn có thể → "already processing".
+ * Catch → đợi idle thêm → retry 1 lần.
  */
 async function runOneTurn(
 	session: Awaited<ReturnType<typeof createAgentSession>>["session"],
@@ -427,10 +454,31 @@ async function runOneTurn(
 	}, timeoutMs);
 
 	try {
-		await Promise.race([session.prompt(text).then(() => ended), ended]);
+		await promptWithIdleRetry(session, text);
+		await ended;
 	} finally {
 		clearTimeout(handle);
 		unsub();
+	}
+}
+
+/**
+ * Prompt với wait-idle + 1 retry khi gặp "already processing".
+ * Race window giữa agent_end emit và SDK reset isStreaming → prompt() throw.
+ */
+async function promptWithIdleRetry(
+	session: Awaited<ReturnType<typeof createAgentSession>>["session"],
+	text: string,
+): Promise<void> {
+	await waitForStreamingIdle(session);
+	try {
+		await session.prompt(text);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		if (!msg.includes("already processing")) throw err;
+		console.warn(`[pi] prompt race (still processing) — wait idle + retry`);
+		await waitForStreamingIdle(session);
+		await session.prompt(text);
 	}
 }
 
