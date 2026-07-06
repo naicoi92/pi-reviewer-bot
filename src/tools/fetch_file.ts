@@ -32,45 +32,114 @@ async function safeResolve(repoDir: string, relPath: string): Promise<string | n
 
 const MAX_FILE_BYTES = 100_000; // 100KB cap per file read
 
+/** Kết quả đọc 1 file. error=null nghĩa là thành công. */
+interface FetchedFile {
+  path: string;
+  size: number;
+  content: string;
+  error: string | null;
+}
+
+/** Đọc 1 file đã safe-resolve. Trả error trong object (không throw) để batch không bị gián đoạn. */
+async function readOne(
+  repoDir: string,
+  relPath: string,
+): Promise<FetchedFile> {
+  try {
+    const trimmed = relPath.trim();
+    if (trimmed.length === 0) {
+      return { path: relPath, size: 0, content: "", error: "Empty path" };
+    }
+    const abs = await safeResolve(repoDir, trimmed);
+    if (!abs) {
+      return { path: trimmed, size: 0, content: "", error: "Path traversal blocked or not found" };
+    }
+    if (!(await exists(abs))) {
+      return { path: trimmed, size: 0, content: "", error: "File not found" };
+    }
+    const s = await stat(abs);
+    if (!s.isFile()) {
+      return { path: trimmed, size: 0, content: "", error: "Not a regular file" };
+    }
+    if (s.size > MAX_FILE_BYTES) {
+      return {
+        path: trimmed,
+        size: s.size,
+        content: "",
+        error: `File too large (${s.size} bytes > ${MAX_FILE_BYTES})`,
+      };
+    }
+    const content = await Bun.file(abs).text();
+    return { path: trimmed, size: s.size, content, error: null };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { path: relPath, size: 0, content: "", error: `Read failed: ${msg}` };
+  }
+}
+
 export function fetchFileTool(ctx: ToolContext) {
   return defineTool({
     name: "fetch_file",
-    label: "Fetch File",
+    label: "Fetch Files",
     description:
-      "Read a file from the cloned repo to verify context (imports, method signatures, neighbour code). " +
+      "Đọc NHIỀU file song song từ repo clone để verify context (imports, method signatures, neighbour code). " +
+      "TRUYỀN ARRAY paths=[\"...\",\"...\"] để đọc nhiều file cùng lúc — KHÔNG call từng file riêng. " +
+      "Chấp nhận 1 string làm shorthand cho single file. " +
       "Use when the diff alone is not enough to judge correctness.",
     promptSnippet:
-      "fetch_file(path): read a file from the repo for additional context.",
+      "fetch_file(paths: string[]): đọc NHIỀU file song song trong 1 call (truyền array). Luôn batch — KHÔNG call riêng từng file. Dùng verify imports/signature/neighbour code ngoài diff.",
     parameters: Type.Object({
-      path: Type.String({
-        description: "Path relative to repo root. e.g. 'src/lib/auth.ts'",
-      }),
+      path: Type.Union(
+        [
+          Type.Array(Type.String(), {
+            description:
+              "Danh sách path relative to repo root — đọc song song. PREFERRED: luôn truyền array kể cả 1 file. e.g. ['src/lib/auth.ts', 'src/utils/token.ts']",
+          }),
+          Type.String({
+            description:
+              "Shorthand cho 1 file. Nếu truyền string, internally wrap thành [string].",
+          }),
+        ],
+        {
+          description:
+            "File path(s) cần đọc. ARRAY = primary mode (batch nhiều file 1 call, song song). " +
+            "string = shorthand cho 1 file. KHÔNG call fetch_file nhiều lần cho nhiều file — truyền 1 array.",
+        },
+      ),
     }),
     async execute(_id, params) {
-      try {
-        const abs = await safeResolve(ctx.repoDir, params.path);
-        if (!abs) {
-          return err(`Path traversal blocked or not found: ${params.path}`);
-        }
-        if (!(await exists(abs))) {
-          return err(`File not found: ${params.path}`);
-        }
-        const s = await stat(abs);
-        if (!s.isFile()) {
-          return err(`Not a regular file: ${params.path}`);
-        }
-        if (s.size > MAX_FILE_BYTES) {
-          return err(`File too large (${s.size} bytes > ${MAX_FILE_BYTES}). Use a narrower scope.`);
-        }
-        const content = await Bun.file(abs).text();
-        return ok(`Fetched ${params.path} (${s.size} bytes)\n\n${content}`, {
-          path: params.path,
-          size: s.size,
-        });
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return err(`Read failed: ${msg}`);
+      const pathsRaw = params.path;
+      const paths = Array.isArray(pathsRaw) ? pathsRaw : [pathsRaw];
+      const cleaned = [...new Set(paths.map((p) => p.trim()).filter((p) => p.length > 0))];
+      if (cleaned.length === 0) {
+        return err("No valid path provided");
       }
+
+      // Multi-file parallel (security guard áp dụng mỗi path)
+      const results = await Promise.all(
+        cleaned.map((p) => readOne(ctx.repoDir, p)),
+      );
+
+      // Format output — mỗi file có header riêng để AI phân biệt
+      const lines: string[] = [];
+      for (const r of results) {
+        lines.push(`## ${r.path}`);
+        if (r.error) {
+          lines.push(`Error: ${r.error}`);
+        } else {
+          lines.push(`(${r.size} bytes)`);
+          lines.push("");
+          lines.push(r.content);
+        }
+        lines.push("");
+      }
+      const okCount = results.filter((r) => !r.error).length;
+      const summary =
+        `Fetched ${results.length} file(s): ${okCount} ok, ${results.length - okCount} failed.`;
+      return ok(`${summary}\n\n${lines.join("\n")}`, {
+        pathCount: results.length,
+        successful: okCount,
+      });
     },
   });
 }
