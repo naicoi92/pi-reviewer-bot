@@ -6,11 +6,11 @@ import { describe, expect, test, spyOn } from "bun:test";
 import { mergeConfig } from "../src/config.ts";
 
 describe("mergeConfig — review.limits", () => {
-	test("defaults include review.limits (maxToolCalls=30, timeoutMs=300000)", () => {
+	test("defaults include review.limits (maxToolCalls=30, timeoutMs=900000)", () => {
 		const cfg = mergeConfig(undefined);
 		expect(cfg.review.limits).toBeDefined();
 		expect(cfg.review.limits?.maxToolCalls).toBe(30);
-		expect(cfg.review.limits?.timeoutMs).toBe(300_000);
+		expect(cfg.review.limits?.timeoutMs).toBe(900_000);
 	});
 
 	test("parses review.limits override", () => {
@@ -26,7 +26,7 @@ describe("mergeConfig — review.limits", () => {
 			review: { limits: { maxToolCalls: -5, timeoutMs: 1.5 } },
 		});
 		expect(cfg.review.limits?.maxToolCalls).toBe(30);
-		expect(cfg.review.limits?.timeoutMs).toBe(300_000);
+		expect(cfg.review.limits?.timeoutMs).toBe(900_000);
 	});
 });
 

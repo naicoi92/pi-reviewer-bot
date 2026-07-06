@@ -74,7 +74,7 @@ export const DEFAULT_CONFIG: ProjectConfig = {
 		// To match "WIP" case-insensitively we use a character class.
 		skipTitleRegex: "\\b(wip|WIP|Wip|dnr|DNR|do not review|Do Not Review)\\b",
 		skipBranchRegex: "^(wip|scratch)/.*",
-		limits: { maxToolCalls: 30, timeoutMs: 300_000 },
+		limits: { maxToolCalls: 30, timeoutMs: 900_000 },
 	},
 	scope: {
 		enabled: false,

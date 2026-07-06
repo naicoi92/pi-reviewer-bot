@@ -150,7 +150,7 @@ Cả 2: job `pi-review` ở `stage: review`, `rules: merge_request_event` (chỉ
 ```yaml
 review:
   language: vi
-  limits: { maxToolCalls: 30, timeoutMs: 300000 }
+  limits: { maxToolCalls: 30, timeoutMs: 900000 }
 block:
   enabled: true              # bot unapprove/approve (cách 2, Premium+)
 llm:

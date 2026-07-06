@@ -340,7 +340,7 @@ export async function runPiReview(opts: {
 	});
 
 	// Hard timeout — kills session AND rejects prompt() promise.
-	const reviewTimeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
+	const reviewTimeoutMs = opts.timeoutMs ?? 15 * 60 * 1000;
 	const timeoutHandle = setTimeout(() => {
 		const msg = `review exceeded ${reviewTimeoutMs}ms`;
 		console.warn(`[pi] ${msg} — aborting session`);

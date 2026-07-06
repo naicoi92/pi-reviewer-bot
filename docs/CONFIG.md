@@ -12,7 +12,7 @@ review:
   skipBranchRegex: "^(wip|scratch)/.*"      # skip branch match
   limits:                                   # review execution limits
     maxToolCalls: 30                        # default 30
-    timeoutMs: 300000                       # default 300000 (5 min)
+    timeoutMs: 900000                       # default 900000 (15 min)
 
 scope:
   enabled: false                            # default false — bật scope alignment check
@@ -35,7 +35,7 @@ llm:
 | `review.skipTitleRegex` | `\b(wip\|WIP\|Wip\|dnr\|DNR\|do not review\|Do Not Review)\b` | JS RegExp, không inline `(?i)` |
 | `review.skipBranchRegex` | `^(wip\|scratch)/.*` | |
 | `review.limits.maxToolCalls` | `30` | số nguyên dương |
-| `review.limits.timeoutMs` | `300000` | số nguyên dương (ms) |
+| `review.limits.timeoutMs` | `900000` | số nguyên dương (ms) |
 | `scope.enabled` | `false` | |
 | `block.enabled` | `false` | cần + GitLab Approval Rule |
 | `llm.model` | (unset) | unset → Pi auto-detect provider |
@@ -65,6 +65,7 @@ trước review (skip logic chỉ là `skipTitle/skipBranchRegex`):
 ### `block` — bot approval state (merge gate)
 
 `enabled: true` → bot gọi `unapprove` (revoke approval cũ ngay khi pipeline mới chạy)
+
 - `approve` (khi review pass) qua GitLab API.
 
 **Merge gate** phụ thuộc setup GitLab (xem [CI_SETUP §2](CI_SETUP.md)):

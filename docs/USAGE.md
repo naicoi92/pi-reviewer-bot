@@ -159,7 +159,7 @@ review:
   skipBranchRegex: "^(wip|scratch)/.*"      # skip branch match
   limits:                                   # review execution limits
     maxToolCalls: 30                        # default 30
-    timeoutMs: 300000                       # default 5 min
+    timeoutMs: 900000                       # default 15 min
 
 scope:
   enabled: true                             # scope alignment check
