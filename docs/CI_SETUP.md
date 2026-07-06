@@ -51,9 +51,25 @@ Project → Settings → CI/CD → Variables
 > Bot KHÔNG dùng `CI_JOB_TOKEN`. Có runtime guard: nếu `GITLAB_API_TOKEN ===
 > CI_JOB_TOKEN` → job fail fast với message rõ.
 
-## Bước 4 — Include CI template
+## Bước 4 — Include CI template (2 option)
 
-Thêm vào `.gitlab-ci.yml` của project:
+### Option A — CI Component (preferred khi đã publish)
+
+Bot đóng gói dưới dạng [GitLab CI Component](https://docs.gitlab.com/ee/ci/components/)
+(`templates/review.yml`) với `inputs` (stage/needs/image) — không cần edit YAML,
+versioned qua tags:
+
+```yaml
+include:
+  - component: $CI_SERVER_FQDN/<gitlab-org>/pi-reviewer-bot/review@~1.0
+    inputs:
+      needs: [lint, test, build]   # default [test, build]
+```
+
+> Components CHỈ reference trong CÙNG GitLab instance. Bot source ở GitHub → cần
+> 1 GitLab project (mirror/catalog) publish component. `~1.0` = auto patch/minor.
+
+### Option B — Raw include (GitHub-hosted, chạy được ngay)
 
 ```yaml
 include:
@@ -61,9 +77,9 @@ include:
 ```
 
 Hoặc copy nội dung `templates/review.gitlab-ci.yml` directly. Chỉnh `needs:` cho
-khớp job names thực tế trong pipeline (vd `test`, `build`).
+khớp job names thực tế (vd `test`, `build`).
 
-Template đặt job `pi-review` ở `stage: review`, `rules: merge_request_event`
+Cả 2 đều đặt job `pi-review` ở `stage: review`, `rules: merge_request_event`
 (chỉ chạy trên MR), `GIT_STRATEGY: none` (bot dùng GitLab API, không checkout).
 
 ## Bước 5 — (Optional) Per-project config

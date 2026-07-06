@@ -51,6 +51,17 @@ Project → Settings → CI/CD → Variables
 
 ### Bước 4 — Include CI template
 
+**Option A (preferred):** CI Component với `inputs` (stage/needs/image), versioned:
+
+```yaml
+include:
+  - component: $CI_SERVER_FQDN/<gitlab-org>/pi-reviewer-bot/review@~1.0
+    inputs:
+      needs: [lint, test, build]
+```
+
+**Option B (raw, GitHub-hosted):**
+
 ```yaml
 # .gitlab-ci.yml
 include:
@@ -59,6 +70,8 @@ include:
 
 Job `pi-review` chạy ở `stage: review`, `rules: merge_request_event`,
 `needs: [test, build]` (CI native đợi pass). Chỉnh `needs:` cho khớp pipeline.
+
+> Component cần GitLab catalog project (bot source ở GitHub). Xem docs/CI_SETUP.md.
 
 📖 **Chi tiết**: [docs/CI_SETUP.md](docs/CI_SETUP.md) — gồm migrate từ webhook,
 exit-code contract, troubleshooting.

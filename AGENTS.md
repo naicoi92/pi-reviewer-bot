@@ -23,6 +23,9 @@ pi-reviewer-bot/
 ├── Dockerfile                      # Multi-stage: Bun --compile + Alpine, ~115MB
 ├── docker-compose.yml              # dev/test convenience
 ├── package.json                    # deps: @earendil-works/pi-coding-agent, @gitbeaker/rest, yaml (no hono — CLI mode)
+├── templates/
+│   ├── review.yml                 # CI Component (spec.inputs: stage/needs/image)
+│   └── review.gitlab-ci.yml       # Raw include fallback (GitHub-hosted)
 ├── tsconfig.json                   # strict mode
 ├── agents/
 │   ├── code-reviewer.md            # BOT-OWNED system prompt (load runtime, KHÔNG copy sang project)

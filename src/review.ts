@@ -36,6 +36,31 @@ export function deriveOutcome(result: PiReviewResult): ReviewOutcome {
 }
 
 /**
+ * Project-level skip filter (WIP/DNR). CI `rules:` chỉ filter được branch (qua
+ * `$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME`), KHÔNG filter được title regex → bot
+ * re-apply skip config sau khi enrich title qua fetchMr.
+ */
+export function shouldSkip(
+	cfg: ProjectConfig,
+	title: string,
+	sourceBranch: string,
+): boolean {
+	if (
+		cfg.review.skipBranchRegex &&
+		new RegExp(cfg.review.skipBranchRegex).test(sourceBranch)
+	) {
+		return true;
+	}
+	if (
+		cfg.review.skipTitleRegex &&
+		new RegExp(cfg.review.skipTitleRegex).test(title)
+	) {
+		return true;
+	}
+	return false;
+}
+
+/**
  * Run one review.
  *
  * Flow: enrich title/description (CI env thiếu) → unapprove-if-block →
@@ -58,6 +83,12 @@ export async function performReview(
 			ctx.description = mr.description ?? "";
 		} catch (e) {
 			log(`warn — fetchMr failed: ${e instanceof Error ? e.message : e}`);
+		}
+
+		// Skip WIP/DNR (project-level filter — CI rules không cover title regex).
+		if (shouldSkip(cfg, ctx.title, ctx.sourceBranch)) {
+			log(`skip — title/branch matches skipTitle/skipBranch regex`);
+			return { ok: true, verdict: "skipped" };
 		}
 
 		// Revoke approval cũ (block=true) — MR blocked trong suốt review lại.
