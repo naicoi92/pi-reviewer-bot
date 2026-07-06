@@ -1,0 +1,42 @@
+# pi-reviewer-bot — GitLab CI Component (D1-revised).
+#
+# Component này đóng gói review job với inputs (stage/needs/image) — user không
+# cần edit YAML. Versioned qua Git tags (semver) + CI/CD Catalog.
+#
+# Consume (sau khi publish vào 1 GitLab catalog project):
+#   include:
+#     - component: $CI_SERVER_FQDN/<gitlab-org>/pi-reviewer-bot/review@~1.0
+#       inputs:
+#         needs: [lint, test, build]
+#
+# Lưu ý: GitLab components CHỈ reference được trong CÙNG GitLab instance. Bot
+# source ở GitHub → cần 1 GitLab project (mirror hoặc catalog riêng) để publish.
+# Bot chưa publish component? Dùng raw include: templates/review.gitlab-ci.yml.
+# Xem docs/CI_SETUP.md.
+
+spec:
+  description: AI code review bot — chạy cuối pipeline, approve/changes MR.
+  inputs:
+    stage:
+      default: review
+      description: CI stage cho review job.
+    needs:
+      type: array
+      default: ["test", "build"]
+      description: Jobs phải pass trước review (CI native wait).
+    image:
+      default: ghcr.io/naicoi92/pi-reviewer-bot:latest
+      description: Bot image. Pin tag cụ thể cho reproducibility.
+---
+pi-review:
+  stage: $[[ inputs.stage ]]
+  image:
+    name: $[[ inputs.image ]]
+    entrypoint: [""]
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  needs: $[[ inputs.needs ]]
+  variables:
+    GIT_STRATEGY: none
+  script:
+    - /app/pi-reviewer-bot

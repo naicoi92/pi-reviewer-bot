@@ -9,9 +9,10 @@
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -t ghcr.io/naicoi92/pi-reviewer-bot:latest --push .
 #
-# Run:
-#   docker run --rm -p 3000:3000 \
-#     -e WEBHOOK_SECRET=... -e GITLAB_API_TOKEN=... -e ZAI_API_KEY=... \
+# Run (local debug — trong CI, GitLab runner execute binary như 1 job):
+#   docker run --rm \
+#     -e CI_MERGE_REQUEST_IID=42 -e CI_PROJECT_ID=100 ... \
+#     -e GITLAB_API_TOKEN=... -e ZAI_API_KEY=... \
 #     pi-reviewer-bot:latest
 #
 # Architecture:
@@ -55,8 +56,8 @@ RUN ls -lh /build/pi-reviewer-bot && file /build/pi-reviewer-bot
 # ─── Stage 2: Alpine runtime (nhẹ, có shell để debug) ────────
 FROM alpine:3.20
 
-# Cài: git (clone repo per-MR), ca-certificates (HTTPS), tzdata (timezone),
-# wget (healthcheck), tini (init để handle signal đúng cách),
+# Cài: git (Pi SDK repo detection), ca-certificates (HTTPS), tzdata (timezone),
+# curl (debug), tini (init để handle signal đúng cách),
 # libstdc++ + libgcc (Bun binary cần glibc libs — Alpine dùng musl nhưng
 # các lib này cung cấp compat layer cho binary compiled với GCC).
 RUN apk add --no-cache \
@@ -64,7 +65,6 @@ RUN apk add --no-cache \
   curl \
   ca-certificates \
   tzdata \
-  wget \
   tini \
   libstdc++ \
   libgcc \
@@ -72,8 +72,8 @@ RUN apk add --no-cache \
   && update-ca-certificates \
   && addgroup -S -g 1001 bot \
   && adduser -S -D -H -u 1001 -G bot bot \
-  && mkdir -p /tmp/pi-reviews /tmp/pi-agent /app \
-  && chown -R bot:bot /tmp/pi-reviews /tmp/pi-agent /app
+  && mkdir -p /tmp/pi-agent /app \
+  && chown -R bot:bot /tmp/pi-agent /app
 
 WORKDIR /app
 
@@ -88,22 +88,14 @@ RUN chmod +x /app/pi-reviewer-bot && chown -R bot:bot /app
 
 USER bot
 
-EXPOSE 3000
-
-# Env defaults (override qua `docker run -e` hoặc docker-compose)
+# Env defaults (override qua CI/CD variables)
 ENV PI_AGENT_DIR=/tmp/pi-agent \
-  REPO_TMP_ROOT=/tmp/pi-reviews \
   NODE_ENV=production \
-  PORT=3000 \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8
-
-# Healthcheck — gọi /healthz mỗi 30s
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget -qO- http://localhost:3000/healthz || exit 1
 
 # tini làm init — handle SIGTERM đúng cách khi docker stop
 ENTRYPOINT ["/sbin/tini", "--"]
 
-# Standalone binary — không cần `bun run`, gọi trực tiếp
+# Standalone binary — không cần `bun run`, gọi trực tiếp (CLI 1-shot trong CI)
 CMD ["/app/pi-reviewer-bot"]

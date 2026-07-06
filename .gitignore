@@ -38,3 +38,8 @@ Desktop.ini
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
+# Local Pi runtime state
+.atl/
+.agents/
+.pi-subagents/
+.pi/

@@ -1,0 +1,30 @@
+# OpenSpec / SDD project context for pi-reviewer-bot.
+# Created via manual init (sdd-init subagent had no codex key).
+# Schema follows gentle-pi sdd-init contract: project context,
+# strict_tdd, phase rules, testing runner details.
+
+project:
+  name: pi-reviewer-bot
+  description: GitLab MR AI code-review bot via Pi SDK.
+  runtime: bun
+  language: typescript
+
+testing:
+  command: bun test
+  typecheck: bun run typecheck
+  framework: bun:test
+  coverage: false
+
+# Project enforces regression tests per AGENTS.md.
+# Strict TDD applies to sdd-apply / sdd-verify.
+strict_tdd: true
+
+# Interactive mode pauses between phases (preflight choice).
+# Auto-forecast chained PR; review budget 400 changed lines.
+phases:
+  mode: interactive
+  artifact_store: openspec
+  chained_pr: auto-forecast
+  review_budget_lines: 400
+# Active SDD change (resolved by dispatcher). Set when a change is started.
+# changes/ directory holds proposal/spec/design/tasks per change.
