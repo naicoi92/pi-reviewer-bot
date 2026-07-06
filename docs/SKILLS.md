@@ -1,348 +1,353 @@
 # SKILLS.md — Luồng công việc với Pi Reviewer Bot
 
-> ⚠️ **D17**: bot giờ chạy như **GitLab CI job** (không webhook). Trigger = push MR
-> → pipeline → `pi-review` job. Setup hiện tại: [USAGE.md](USAGE.md) + [CI_SETUP.md](CI_SETUP.md).
-> Phần workflow daily (mở MR → đọc comment → fix → re-review) bên dưới vẫn đúng;
-> chỉ thay "bot nhận webhook" → "bot chạy CI job cuối pipeline".
+> 🔧 **D17 — CI-job mode**: bot chạy như **GitLab CI job** (`pi-review`) cuối pipeline.
+> Push MR → pipeline → CI pass (`needs:`) → `pi-review` job → bot approve/request_changes.
+> KHÔNG còn webhook server, KHÔNG còn "Đợi CI pass" / "CI failed" note (ciwait/ci.require
+> đã purge). Setup: [USAGE.md](USAGE.md) + [CI_SETUP.md](CI_SETUP.md).
 
 > Tài liệu này dành cho **developer và AI agent** (Claude Code, Cursor, Pi, Codex...)
-> làm việc trong GitLab project **đã tích hợp pi-reviewer-bot**. Sau khi bot đã
-> setup xong (xem [USAGE.md](USAGE.md)), đây là các luồng công việc
-> bạn sẽ gặp **mỗi khi tạo hoặc cập nhật Merge Request**.
+> làm việc trong GitLab project **đã tích hợp pi-reviewer-bot**. Đây là các luồng công
+> việc bạn gặp **mỗi khi tạo hoặc cập nhật Merge Request**.
 >
 > Mỗi skill mô tả: khi nào gặp, bot sẽ làm gì, bạn cần làm gì tiếp.
 
 ---
 
-## Skill 1 — Tạo MR để bot review ngay lập tức
+## Skill 1 — Mở MR để trigger review
 
 **Khi nào**: bạn vừa mở MR mới hoặc push commit lên MR đang mở.
 
-### MR của bạn cần đạt 4 điều kiện để bot nhận + review
+### Trigger flow (CI-job mode)
 
-| # | Điều kiện | Ví dụ đúng | Ví dụ sai (bot skip) |
+```
+Push commit → GitLab trigger pipeline (merge_request_event)
+   │
+   ▼  jobs trong `needs:` chạy (lint, test, build, ...)
+   │  all pass
+   ▼
+pi-review job (stage: review, ephemeral runner)
+   ├─ Đọc context từ GitLab CI predefined env (CI_MERGE_REQUEST_*, CI_PROJECT_*)
+   ├─ Load .pi/config.yaml
+   ├─ unapprove MR nếu block.enabled (revoke approval cũ)
+   ├─ fetch diff qua GitLab API
+   ├─ AI reviewer chạy 12 tools → post inline comments + summary verdict
+   └─ exit code → MR state (exit 1 = MR blocked)
+```
+
+### MR conditions để `pi-review` job chạy + bot xử lý
+
+| # | Điều kiện | Đúng | Sai (skip/blocked) |
 |---|---|---|---|
-| 1 | MR không phải Draft | `feat: add login` | `Draft: feat: add login` |
-| 2 | Action là `open` / `update` / `reopen` | Push commit (update) | `close` / `merge` / `approved` |
-| 3 | Title không chứa WIP/DNR | `feat: add login` | `WIP: login` / `(do not review)` |
-| 4 | Branch không thuộc `wip/*` `scratch/*` | `feat/T-11-login` | `wip/login` / `scratch/test` |
-
-### Nếu dùng CI wait mode (`ci.require: true`)
-
-Push commit → GitLab trigger pipeline → bot **không review ngay** mà đợi CI pass
-(xem Skill 3). Bạn sẽ thấy note "⏸ Đợi CI pass" trong MR.
+| 1 | Job chạy trong MR context | `rules: merge_request_event` match | Push main/tag → job skip (đúng) |
+| 2 | `needs:` đã pass | lint/test/build xanh | Job pending hoặc skip do dep fail |
+| 3 | Title không match `skipTitleRegex` | `feat: add login` | `WIP: login` / `(do not review)` → bot skip |
+| 4 | Branch không match `skipBranchRegex` | `feat/T-11-login` | `wip/login` / `scratch/test` → bot skip |
 
 ### Việc của bạn
 
 1. Tạo branch đúng convention (nếu project có `scope.enabled`, vd `feat/T-XX-*`).
-2. Commit + push lên remote.
-3. Mở MR từ GitLab UI (hoặc tool bạn quen) — title rõ ràng, description có
-   `Resolves: #N` nếu project dùng scope alignment.
-
-→ Bot nhận webhook trong <2s, bắt đầu review sau ~5-30s (clone repo + load config).
+2. Commit + push.
+3. Mở MR — title rõ ràng, description có `Resolves: #N` nếu project dùng scope alignment.
+4. Pipeline tự chạy. CI pass → `pi-review` job review (~30s-5 phút tùy diff + LLM).
 
 ---
 
-## Skill 2 — Đợi bot review (sau khi push commit)
+## Skill 2 — Đợi review (sau khi push commit)
 
-**Khi nào**: bạn vừa push, MR đã mở, đang chờ bot phản hồi.
+**Khi nào**: bạn vừa push, pipeline đang chạy, đang chờ bot phản hồi.
 
 ### Timeline kỳ vọng
 
 ```
-T+0s     Push commit
-T+2s     GitLab gửi webhook tới bot
-T+5-30s  Bot clone repo + load .pi/config.yaml + fetch diff
-T+30s-5phút  Bot chạy AI review (10 tools) + post comments + approve/request_changes
+T+0       Push commit
+T+0..?s   Pipeline start: lint/test/build/... chạy (tùy project)
+          (pi-review ở stage "review", đợi `needs:` pass)
+T+CI-pass  pi-review job start:
+            - load config + fetch diff (~1-3s)
+            - unapprove MR nếu block.enabled
+            - AI review (~30s-5phút tùy diff + LLM provider)
+T+CI-pass+review  post comments + summary → exit code → MR state
 ```
 
-Nếu sau **5 phút** vẫn không có comment gì → xem Skill 9 (debug "bot im lặng").
+Nếu sau **CI pass + 5 phút** `pi-review` job vẫn running → check job log (Skill 6).
 
-### Việc của bạn
+### Trạng thái bot post / job state
 
-- **Đợi**. Không push commit mới (nếu push, review cũ sẽ bị huỷ — xem Skill 6).
-- Nếu `block.enabled: true`: MR sẽ ở trạng thái **blocked** cho đến khi bot approve.
-
-### Các trạng thái bot có thể post
-
-| Note bot post | Ý nghĩa | Skill xử lý |
+| Tín hiệu | Ý nghĩa | Skill |
 |---|---|---|
-| (không có note, có inline comment + summary) | Review thành công | Skill 4 |
-| `⏸ Đợi CI pass` | CI đang chạy, bot đợi | Skill 3 |
-| `🚫 CI failed` | CI fail, bot skip review | Skill 5 |
-| `🤖 Review failed (Bot error)` | Bot crash (rare) | Skill 7 |
-| `⚠️ Review inconclusive` | AI không verdict được | Skill 8 |
+| `pi-review` job **passed** + ✅ summary "Approved" + inline comments | Review OK, bot approve | Skill 3 |
+| `pi-review` job **passed** + ⚠️ summary "Changes Requested" + 🔴 inline | Có critical | Skill 3 |
+| `pi-review` job **failed** (exit 1) + `## ⚠️ Review inconclusive` | AI chạy xong nhưng không verdict | Skill 5 |
+| `pi-review` job **failed** (exit 1) + `## 🤖 Review failed` | Bot error (LLM/network/timeout) | Skill 5 |
+| `pi-review` job **skipped** (no note) | Not MR / needs chưa pass / WIP / branch skip | Skill 6 |
+| `pi-review` job **pending/running** | Bot đang review | Đợi |
+
+> 💡 **Pipeline status = success ⇔ `pi-review` đã exit 0 ⇔ bot đã post verdict** (Approved /
+> Changes Requested, hoặc skip no-comment nếu WIP/no diff). KHÔNG có trạng thái "pipeline xanh
+> nhưng chưa có review" — review là 1 job trong pipeline, pipeline pass nghĩa là nó đã chạy xong.
+
+> ⚠️ **KHÔNG còn note "⏸ Đợi CI pass" hay "🚫 CI failed"** — đó là webhook-era (D10).
+> CI native `needs:` lo việc đợi CI; nếu CI fail thì `pi-review` job không chạy (pending/skip).
 
 ---
 
-## Skill 3 — Đọc note "⏸ Đợi CI pass" → đợi
+## Skill 3 — Đọc summary verdict + inline comments
 
-**Khi nào**: project có `ci.require: true`, bạn push commit, CI bắt đầu chạy.
+**Khi nào**: `pi-review` job đã chạy xong, có comment trong MR.
 
-### Bot sẽ post note dạng
+### Bước 1: Đọc summary verdict (top-level note)
 
-```
-## ⏸ Đợi CI pass
-
-Pipeline đang chạy (running). Bot sẽ review tự động khi CI pass.
-
-SHA: abc12345 · Timeout: 600s
-```
-
-### Việc của bạn
-
-1. **Mở pipeline status** trong GitLab MR (tab "Pipelines") để xem CI chạy tới đâu.
-2. **Đợi** — KHÔNG push commit mới trong lúc này (xem Skill 6 để hiểu lý do).
-3. Khi CI pass → GitLab gửi pipeline webhook → bot tự trigger review (sau ~30s-5 phút).
-4. Khi CI fail → bot post note `🚫 CI failed` → chuyển Skill 5.
-
-### Edge case: CI chạy quá lâu
-
-Nếu CI chạy lâu hơn timeout (default 10 phút), bot sẽ **proceed review anyway**
-sau timeout + log warning. Bạn không cần làm gì — vẫn sẽ nhận được review.
-
-### Edge case: re-push commit trong lúc CI chạy
-
-Bạn push commit mới để fix CI flake:
-
-- Pending entry cũ (SHA=a) bị clear → bot đợi CI của SHA mới (SHA=b).
-- Note "⏸ Đợi CI pass" mới sẽ được post cho SHA=b (note cũ SHA=a vẫn còn — đây là lịch sử).
-
----
-
-## Skill 4 — Đọc inline comments + summary verdict
-
-**Khi nào**: bot đã review xong, có comment trong MR.
-
-### Bước 1: Đọc summary verdict (top-level comment)
-
-Bot luôn post 1 top-level note dạng:
+Bot luôn post 1 top-level note trước khi approve (guardrail `post_summary`):
 
 ```markdown
-## 🤖 Review (Pi + GLM-5.2)
+## ✅ Approved  (hoặc ⚠️ Changes Requested)
 
-### Verdict: APPROVE | REQUEST_CHANGES
+**Tóm tắt:** <overall assessment>
 
-**Summary:** <overall assessment>
-
-**Counts:** 🔴 X critical · 🟡 Y suggestions · 🔵 Z nits · ✅ W praise
+**Counts:** 🔴 X critical · 💡 Y suggestion · 🎨 Z nit · ✅ W praise
 ```
 
 ### Bước 2: Xử lý theo verdict
 
-| Verdict | Ý nghĩa | Việc của bạn |
-|---|---|---|
-| **APPROVE** | Code OK, bot đã approve | Merge được (nếu `block.enabled: true` thì MR đã unblocked) |
-| **REQUEST_CHANGES** | Có ≥1 critical issue | Đọc critical inline comment → fix → push → re-review (Skill 6) |
+| Verdict | Ý nghĩa | Gate effect | Việc của bạn |
+|---|---|---|---|
+| **APPROVE** | Code OK, bot approve (`approve_mr`) | Gate 2 unblock (Premium+) | Merge được |
+| **REQUEST_CHANGES** | Có ≥1 critical, bot `request_changes` | Gate 2 vẫn block | Fix hết 🔴 → push → re-review |
 
-### Bước 3: Đọc inline comments theo thứ tự ưu tiên
+> **Gate 1 (status check, mọi tier)**: cả APPROVE lẫn changes_requested đều `exit 0` (pipeline pass). Gate 1 KHÔNG phân biệt — chỉ block khi `exit 1` (inconclusive/error). Xem Skill 7.
 
-Bot post DiffNote line-specific với 4 severity:
+### Bước 3: Đọc inline DiffNote theo thứ tự ưu tiên
+
+Bot post line-specific DiffNote với 4 severity:
 
 | Severity | Ý nghĩa | Phải fix? |
 |---|---|---|
-| 🔴 **critical** | Security, crash, data loss, license violation | ✅ **BẮT BUỘC** trước merge (block approve) |
-| 🟡 **suggestion** | Better pattern, performance, readability | Nên fix, không bắt buộc |
-| 🔵 **nit** | Style, naming, formatting | Tùy |
+| 🚫 **critical** | Security, crash, data loss, license violation | ✅ **BẮT BUỘC** trước merge (block `approve_mr`) |
+| 💡 **suggestion** | Better pattern, performance, readability | Nên fix, không bắt buộc |
+| 🎨 **nit** | Style, naming, formatting | Tùy |
 | ✅ **praise** | Highlight good pattern | (informational) |
 
 ### Việc của bạn
 
-1. Mở MR trong GitLab UI → tab "Changes".
-2. Tìm tất cả comment có 🔴 critical — fix hết trước khi push.
-3. Suggestion/nit: quyết định fix hay skip (reply "acknowledged" nếu skip).
-4. Đối với mỗi critical đã fix → "Resolve thread" trong GitLab UI.
+1. Mở MR → tab "Changes".
+2. Tìm tất cả 🚫 critical — fix hết trước khi push.
+3. suggestion/nit: quyết định fix hay skip (reply "acknowledged" nếu skip — Skill 8).
+4. Với mỗi critical đã fix → "Resolve thread" trong GitLab UI.
 
 ---
 
-## Skill 5 — Đọc note "🚫 CI failed" → fix CI
+## Skill 4 — Re-push commit (khi đang review hoặc đã xong)
 
-**Khi nào**: project có `ci.require: true`, CI pipeline fail/canceled/skipped.
+**Khi nào**: cần push commit mới trong lúc bot đang làm việc.
 
-### Bot sẽ post note dạng
+### Cơ chế: pipeline mới = review job mới
 
-```
-## 🚫 CI failed — skip review
+CI-job mode: mỗi push = pipeline mới = `pi-review` job ephemeral mới. Bot KHÔNG có
+logic "cancel review cũ" (D11 AbortController đã OBSOLETE).
 
-Pipeline failed. Bot sẽ không review cho commit này.
-
-Fix CI và push commit mới để trigger review lại.
-```
-
-### Việc của bạn
-
-1. Mở GitLab MR → tab "Pipelines" → xem job nào fail.
-2. Fix lỗi CI (lint, typecheck, test, build...).
-3. Push commit mới.
-4. Bot sẽ re-check pipeline status của commit mới. Nếu pass → review. Nếu fail tiếp → lặp lại.
-
-### Edge case: CI fail vì flake test
-
-Nếu CI fail vì test flaky (không phải do code bạn):
-
-- **Retry pipeline** trong GitLab UI → pipeline mới chạy lại với cùng SHA.
-- Pipeline webhook `status=success` đến → bot trigger review (nếu pending entry còn).
-- Nếu pending entry đã expire (timeout) → push commit (có thể empty commit) để re-trigger.
-
----
-
-## Skill 6 — Re-push commit (khi đang review hoặc đang đợi CI)
-
-**Khi nào**: bạn cần push commit mới trong lúc bot đang làm việc.
-
-### Cơ chế: cancel-and-restart
-
-Bot **cancel** review cũ và **start** review mới cho commit mới:
-
-```
-T0: push SHA=a → bot đang review SHA=a
-T1: push SHA=b → bot AbortSignal review SHA=a:
-    - AI dừng ngay
-    - Bot KHÔNG post note/comment cho SHA=a (im lặng)
-    - Bot chạy review SHA=b fresh
-```
+| Trạng thái pipeline cũ | Khi push mới |
+|---|---|
+| `pi-review` cũ đang chạy | GitLab auto-cancel redundant pipeline (nếu setting `auto_cancel_pending_pipelines` ON) hoặc chạy song song rồi exit |
+| Pipeline cũ chưa tới review stage | Pipeline mới start, pipeline cũ bị thay thế |
+| Pipeline cũ đã exit | Pipeline mới start fresh |
 
 ### Tác động
 
-| Trạng thái bot | Khi push mới |
-|---|---|
-| Đang review SHA=a | Review SHA=a bị huỷ → bot review SHA=b |
-| Đang đợi CI SHA=a | Pending entry SHA=a bị clear → bot đợi CI SHA=b |
-| Đã review xong SHA=a | Push commit mới → bot re-review SHA=b từ đầu |
+- **Auto-cancel ON** (default nhiều project): pipeline cũ bị cancel → review job cũ killed mid-review → KHÔNG post comment (AI dừng). Đây là **GitLab behavior**, không phải bot.
+- **Auto-cancel OFF**: review job cũ + mới chạy song song → có thể 2 set comment (SHA cũ + SHA mới). Hiếm.
+- **Approval revoke**: bot `unapprove` ở đầu mỗi review job (`block.enabled`) → approval cũ revoke khi pipeline mới tới review stage.
 
 ### Việc của bạn
 
-- **Không cần lo về duplicate comment** — review cũ bị huỷ nên không có comment thừa.
-- **Token AI đã dùng cho review cũ bị mất** (trade-off chấp nhận được — tránh spam).
-- **Nếu push 5 commit liên tiếp** nhanh: chỉ commit cuối được review, 4 commit đầu bị huỷ. Đây là behavior đúng — không phải bug.
-- **2 MR khác nhau** (khác MR IID) không huỷ lẫn nhau — review song song bình thường.
+- Push bình thường — CI native lo concurrency, KHÔNG cần lo duplicate comment.
+- Nếu review job cũ đang chạy và bạn muốn chấm dứt ngay: push commit mới → GitLab auto-cancel.
+- Muốn tránh 2 review song song: bật `auto_cancel_pending_pipelines` (Project → Settings → CI/CD → General pipelines).
+- 2 MR khác IID (khác branch) → 2 pipeline độc lập, KHÔNG thay thế lẫn nhau.
 
 ---
 
-## Skill 7 — Đọc note "🤖 Review failed (Bot error)" → re-trigger
+## Skill 5 — Đọc note "🤖 Review failed" / "⚠️ Inconclusive" → fix + re-run
 
-**Khi nào**: bot crash (rare) — timeout, GitLab API fail, model unavailable.
+**Khi nào**: `pi-review` job fail (`exit 1`), MR blocked.
 
-### Bot sẽ post note dạng
+### Cơ chế phòng thủ verdict (D19)
 
-```
+Bot có 2 lớp tự phục hồi trước khi báo inconclusive:
+
+1. **Session retry** (`MAX_SESSION_RETRIES=2`): session crash (stream error, JSON parse,
+   network) → tạo fresh session, review lại từ đầu. Tối đa 3 attempts.
+2. **Verdict remind** (`MAX_VERDICT_REMINDS=2`): cùng session, AI end turn chưa verdict →
+   bot nhắc trong context (include state: summary/critical count → AI biết bước tiếp).
+   Tối đa 3 turns/session. Rẻ (~5s) vs retry (~3min).
+
+→ Chỉ khi cả 2 lớp thất bại bot mới post note inconclusive. Xem log job để trace.
+
+### Bot post note dạng
+
+```markdown
 ## 🤖 Review failed
 
-⚠️ Bot error: <error message>
+⚠️ **Bot error:** <error message>
 
-Bot will retry on next push.
+_Merge blocked until bot succeeds. Retry pi-review job, manually approve to override._
 ```
 
-### Việc của bạn
+Hoặc inconclusive (note mới D19 — include attempts + gợi ý đọc comment quyết định):
 
-Re-trigger review bằng 1 trong 2 cách:
-
-- **Cách A (recommend)** — push commit (có thể empty commit để chỉ trigger webhook).
-- **Cách B** — Close rồi Reopen MR trong GitLab UI.
-
-Bot sẽ re-review. Nếu vẫn fail liên tục → liên hệ admin bot service (check `/healthz`).
-
----
-
-## Skill 8 — Đọc note "⚠️ Review inconclusive" → re-trigger
-
-**Khi nào**: bot chạy review xong nhưng AI không issue verdict (vd timeout giữa chừng, model yếu).
-
-### Bot sẽ post note dạng
-
-```
+```markdown
 ## ⚠️ Review inconclusive
 
-Bot finished review but did not issue a verdict.
+Bot finished review (after 3 session retries + 2 verdict reminds) but did not issue a verdict.
 
-Summary: <text bot đã post, có thể rỗng>
+**Summary:** <text bot đã post, có thể rỗng>
 
-Inconclusive review blocks merge. Push a new commit to retry, or manually approve to override.
+**Inline comments posted:** X (Y critical). Đọc comments trong tab Changes để quyết định
+thủ công: merge nếu OK, hoặc fix + push lại nếu có critical chưa xử lý.
+
+_Inconclusive review blocks merge. Retry pi-review job, manually approve to override, hoặc push commit mới._
 ```
+
+> 💡 **Bot KHÔNG auto-derive verdict từ inline comments** — user tự đọc comments trong tab
+> Changes quyết định. Nếu thấy OK → manually approve + merge; nếu có critical chưa xử lý →
+> fix + push commit mới.
+
+`exit 1` → pipeline fail → MR blocked (Gate 1 "Pipelines must succeed").
 
 ### Việc của bạn
 
-1. **Đọc partial summary** (nếu có) — có thể có thông tin hữu ích dù không verdict.
-2. **Re-trigger review** — push commit (có thể empty commit) hoặc reopen MR.
-3. Nếu vẫn inconclusive sau 2-3 lần thử → có thể model yếu, cần admin bot đổi model (`llm.model` trong `.pi/config.yaml` hoặc `DEFAULT_MODEL` env).
+1. **Check job log**: GitLab MR → tab "Pipelines" → click pipeline → click `pi-review` job → đọc log.
+2. **Lỗi phổ biến**:
+
+   | Log / error | Nguyên nhân | Fix |
+   |---|---|---|
+   | `GITLAB_API_TOKEN === CI_JOB_TOKEN` | Dùng nhầm CI_JOB_TOKEN | Đổi sang PAT/Project Access Token scope `api` ([CI_SETUP §1](CI_SETUP.md)) |
+   | `GITLAB_API_TOKEN not set` | Token đánh dấu Protect (chỉ protected branch) | Bỏ `Protect variable`, giữ `Masked` ([CI_SETUP §3](CI_SETUP.md)) |
+   | `Missing CI env var: CI_MERGE_REQUEST_IID` | Job chạy ngoài MR context | Template phải có `rules: if: $CI_PIPELINE_SOURCE == "merge_request_event"` |
+   | LLM timeout / 401 | Sai API key hoặc provider outage | Check CI/CD Variable key; đổi provider qua `llm.model` |
+   | `Review inconclusive` lặp lại | AI burn budget vào tools, không verdict (xem log: nhiều tool calls, no verdict). Bot đã retry session + remind (D19) mà vẫn fail | Tăng `review.limits.maxToolCalls`/`timeoutMs`, đổi `llm.model` mạnh hơn. Nếu gấp → manually approve + merge |
+
+3. **Retry chính `pi-review` job** (không re-run cả pipeline):
+
+   ```
+   GitLab MR → Pipelines → click pi-review job → ↻ Retry
+   ```
+
+   Chạy lại đúng job đó, cùng SHA, **KHÔNG tốn CI chạy lại lint/test/build**. Đọc log job mới.
+   - Nếu fix code rồi mới retry → push commit mới → pipeline mới.
+   - Retry 2-3 lần vẫn cùng lỗi → đọc log kỹ lại (bước 2), hoặc báo admin check CI runner/image.
 
 ---
 
-## Skill 9 — Debug "Bot im lặng" (không comment, không review)
+## Skill 6 — Debug "Bot im lặng" (không comment, không review)
 
-**Khi nào**: đã push commit >5 phút, không thấy comment/note nào từ bot.
+**Khi nào**: đã push commit, pipeline chạy xong nhưng không có comment/note nào từ bot.
 
-### Bước 1: Check webhook delivery
+> ⚠️ **KHÔNG còn "check webhook delivery"** — bot là CI job, không nhận webhook.
+> Debug bắt đầu từ **pipeline + job state trong GitLab UI**.
+
+### Bước 1: Check pipeline đã chạy + `pi-review` job state
 
 ```
-GitLab project → Settings → Webhooks → click webhook → "Recent events"
+GitLab MR → tab "Pipelines"
 ```
 
 | Triệu chứng | Nguyên nhân | Fix |
 |---|---|---|
-| Không có event nào | Webhook chưa enable đúng trigger | Check tick "Merge request events" (và "Pipeline events" nếu ci.require) |
-| Event có nhưng 4xx/5xx response | Bot service down / URL sai / secret sai | Liên hệ admin bot service |
-| Event có, 200 OK | Bot nhận được nhưng skip hoặc đang chạy | Đi bước 2 |
+| Không có pipeline nào | `.gitlab-ci.yml` chưa include template / commit không push | Check `include:` template, push commit |
+| Có pipeline nhưng không có `pi-review` job | Template include sai / `stage: review` không có trong `stages:` | Fix `.gitlab-ci.yml` ([USAGE §3.5](USAGE.md)) |
+| `pi-review` job **pending** | `needs:` chưa pass | Đợi CI, hoặc fix job phụ thuộc fail |
+| `pi-review` job **skipped** | `needs:` có dep fail (skip) hoặc `rules:` không match | Fix dep, check `rules` |
+| `pi-review` job **running** | Bot đang review | Đợi (Skill 2) |
+| `pi-review` job **failed** | Bot error | Click job → đọc log (Skill 5) |
+| `pi-review` job **passed** nhưng không comment | Bot skip (title regex) / no diff | Check title, check `skipTitleRegex` |
 
-### Bước 2: Check skip reasons (nếu có quyền xem bot log)
+### Bước 2: Check job log (nếu job ran)
 
-Bot log sẽ có 1 trong các skip reason sau:
+```
+GitLab MR → Pipelines → click pipeline → click pi-review job
+```
+
+Log pattern bot skip:
 
 | Log pattern | Ý nghĩa | Fix |
 |---|---|---|
-| `[webhook] skip !XX — draft` | MR đang Draft | Unmark Draft trong GitLab UI |
-| `[webhook] skip !XX — action=approved` | Webhook trigger không phải push/open | Push commit để trigger `action=update` |
-| `[webhook] skip !XX — update-without-commit` | Chỉ edit title/description/labels | Push commit (empty commit OK) |
-| `[webhook] skip !XX — title-skip-regex` | Title chứa WIP/DNR | Đổi title |
-| `[webhook] skip !XX — branch-skip-regex` | Branch match `wip/*` `scratch/*` | Đổi branch name |
-| `[webhook] skip !XX — reason=action=test` | Webhook Test từ GitLab UI (không phải MR thật) | Mở MR thật |
-| `[review !XX] ci: pipeline running` | CI đang chạy, bot đợi | Đợi CI pass |
-| `[review !XX] ci: pipeline failed` | CI fail | Fix CI (Skill 5) |
+| `[review !XX] skip — title/branch matches skipTitle/skipBranch regex` | Title/branch match skip config | Đổi title/branch, hoặc bỏ `skipTitleRegex`/`skipBranchRegex` khỏi `.pi/config.yaml` |
+| `[review !XX] skip` + note "No file changes detected" | Diff rỗng | Không phải bug — MR chưa có diff |
 
-### Bước 3: Re-trigger thủ công
+### Bước 3: Re-trigger
 
-Push commit (có thể empty commit để chỉ trigger webhook) hoặc reopen MR.
+- **Retry chính `pi-review` job** (GitLab ↻ Retry — chạy lại đúng job, cùng SHA, không tốn CI chạy lại lint/test/build).
+- Hoặc **push commit mới** → pipeline mới.
 
-Nếu vẫn không review sau bước 3 → liên hệ admin bot service.
+Nếu vẫn không review sau bước 3 → báo admin check CI runner, CI/CD Variables, image bot.
 
 ---
 
-## Skill 10 — Merge MR (khi `block.enabled: true`)
+## Skill 7 — Merge MR (khi bật merge gate)
 
-**Khi nào**: project bật merge gate, MR đã được bot approve.
+**Khi nào**: project bật merge gate, MR đã pass review.
+
+### 2 cơ chế gate
+
+**Gate 1 — protected branch "Pipelines must succeed"** (mọi tier, KHUYẾN NGHỊ):
+
+```
+Project → Settings → Repository → Protected branches
+  Allowed to merge: Maintainers
+  ☑ Pipelines must succeed
+```
+
+| `pi-review` exit | Pipeline | Merge |
+|---|---|---|
+| 0 (approved / changes_requested / skipped) | pass | ✅ mergeable |
+| 1 (inconclusive / error) | fail | 🚫 blocked |
+
+> Gate 1 KHÔNG phân biệt approved vs changes_requested (cùng `exit 0`). Nếu bot post 🔴 critical nhưng verdict changes_requested → pipeline vẫn pass → user **tự giác không merge**. Cần block cứng → dùng Gate 2.
+
+**Gate 2 — Approval Rule require bot + `block.enabled: true`** (Premium+ / Self-Managed, tùy chọn thêm):
+
+```
+Project → Settings → Merge requests → Approval rules
+  Add: "Require bot review", Approvals required: 1, Approvers: <bot user>
+```
+
+```
+Bot unapprove đầu review (block.enabled) → MR blocked
+Bot approve_mr (guardrail: 0 critical + đã post_summary) → MR unblocked
+Bot request_changes → KHÔNG approve → vẫn blocked
+```
+
+Gate 2 block cứng changes_requested (bot không approve → approval 0/1).
 
 ### Workflow trạng thái MR
 
 ```
-MR mở         → bot chưa review        → 0/1 approval → BLOCKED 🚫
-Bot review:
-  → APPROVE          → bot approve      → 1/1 approval → UNBLOCKED ✅ → merge được
-  → REQUEST_CHANGES  → bot unapprove    → 0/1          → BLOCKED 🚫 → fix critical → re-review
-Push commit mới → bot unapprove NGAY → BLOCKED → bot re-review → re-approve/unapprove
-                  (đảm bảo MR blocked trong window review lại)
+MR mở → pi-review chưa chạy      → (gate1: pipeline chạy / gate2: 0 approval) → BLOCKED 🚫
+pi-review chạy xong:
+  → approved            → exit 0 → (gate1: pass / gate2: bot approve)   → MERGEABLE ✅
+  → changes_requested   → exit 0 → (gate1: pass 🔴 / gate2: blocked)    → fix 🔴 → re-push
+  → inconclusive/error  → exit 1 → (gate1: fail / gate2: blocked)       → retry pi-review job
+Push commit mới → pipeline mới → bot unapprove → re-review → re-approve/unapprove
 ```
 
 ### Việc của bạn
 
-1. **Đợi** bot approve (sau khi fix hết critical + push).
-2. Khi MR unblocked → **Merge** button clickable trong GitLab UI.
-3. Push commit mới bất kỳ → GitLab auto-reset approval → bot re-review → re-approve.
+1. Đợi `pi-review` job pass + (Gate 2) bot approve.
+2. Fix hết 🔴 critical → push → pipeline mới → re-review.
+3. Job pass → Merge button clickable.
 
-### Override khẩn cấp (merge ngay cả khi bot chưa approve)
+### Override khẩn cấp (merge ngay cả khi bot chưa pass)
 
-```
-GitLab MR → Merge requests → Approval rules
-  → manually click "Approve" với account developer khác
-  → Approvals required: 1/1 → unblocked → merge
-```
-
-Bot không chặn vật lý — chỉ là required approver. User luôn có thể override.
+- **Gate 1 (status check)**: không override trực tiếp khi bot outage. Admin tạm set
+  `allow_failure: true` trên `pi-review` trong template, hoặc fix bot. Không có nút "bypass".
+- **Gate 2 (Approval Rule)**: manually "Approve" bằng account developer khác → approval 1/1 →
+  merge. Bot chỉ là required approver, user luôn override được.
 
 ---
 
-## Skill 11 — Reply comment "acknowledged" cho suggestion/nit
+## Skill 8 — Reply comment "acknowledged" cho suggestion/nit
 
-**Khi nào**: bot post `suggestion` hoặc `nit`, bạn quyết định không fix.
+**Khi nào**: bot post `suggestion` (💡) hoặc `nit` (🎨), bạn quyết định không fix.
 
 ### Việc của bạn
 
@@ -352,12 +357,12 @@ GitLab MR → tab "Changes" → tìm comment suggestion/nit
   → Resolve thread
 ```
 
-Bot không re-check resolved thread ở review sau (chỉ đọc top-level notes qua
-`list_mr_comments()`). Resolved thread = tín hiệu bạn đã xem.
+Bot đọc top-level notes qua `list_mr_comments()` cho idempotent re-review. Resolved thread
+= tín hiệu bạn đã xem; bot không re-flag suggestion/nit đã resolve.
 
 ### Khi nào KHÔNG nên resolve
 
-- 🔴 **critical** chưa fix → KHÔNG resolve (bot sẽ re-flag trong re-review nếu còn).
+- 🚫 **critical** chưa fix → KHÔNG resolve (bot sẽ re-flag trong re-review nếu còn).
 - Suggestion bạn chưa quyết định → để mở, reply "considering".
 
 ---
@@ -365,31 +370,28 @@ Bot không re-check resolved thread ở review sau (chỉ đọc top-level notes
 ## Cheat sheet — trạng thái MR + action tiếp theo
 
 ```
-Bạn push commit
-       ↓
-Bot có post note trong 30s không?
-       ├── KHÔNG (sau 5 phút) → Skill 9 (debug)
-       └── CÓ:
-            ├── "⏸ Đợi CI pass"     → Skill 3 (đợi)
-            ├── "🚫 CI failed"       → Skill 5 (fix CI)
-            ├── "🤖 Review failed"   → Skill 7 (retry)
-            ├── "⚠️ Inconclusive"    → Skill 8 (retry)
-            └── (inline + summary)   → Skill 4 (đọc verdict)
-                                         ↓
-                                    Verdict:
-                                    ├── APPROVE → Skill 10 (merge)
-                                    └── REQUEST_CHANGES → fix critical → Skill 6 (re-push)
-                                                                                ↓
-                                                                          Bot re-review
-                                                                                ↓
-                                                                          (loop về đầu)
+Push commit
+     ↓
+Pipeline chạy (lint/test/build → pi-review cuối)
+     ↓
+pi-review job status?
+     ├── Pending                → đợi needs (Skill 2)
+     ├── Skipped (not MR / WIP) → check rules/skipRegex (Skill 6)
+     ├── Running                → đợi (Skill 2)
+     ├── Failed (exit 1)        → đọc log → retry CHÍNH job đó (Skill 5)
+     │                            (bot đã post: ⚠️ Inconclusive hoặc 🤖 Review failed)
+     └── Passed (exit 0) → kết quả review ĐÃ trong MR:
+          ├── ✅ Approved          → merge (Skill 7)
+          ├── ⚠️ Changes Requested → fix 🚫 critical → push (Skill 4) → re-review
+          └── (skip, no comment)   → check title/branch/skipRegex (Skill 6)
 ```
 
 ---
 
 ## Tham khảo
 
-- [INTEGRATION.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/INTEGRATION.md) — setup bot cho project của bạn (lần đầu)
-- [CONFIG.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/CONFIG.md) — full schema `.pi/config.yaml`
-- [agents/code-reviewer.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/agents/code-reviewer.md) — system prompt AI reviewer (rules bot tuân thủ)
-- [ARCHITECTURE.md](https://github.com/naicoi92/pi-reviewer-bot/blob/main/docs/ARCHITECTURE.md) — design decisions, decision log D1-D11
+- [USAGE.md](USAGE.md) — setup bot cho project của bạn (lần đầu), luồng daily đầy đủ
+- [CI_SETUP.md](CI_SETUP.md) — tier-aware token + merge gate + CI/CD Variables
+- [CONFIG.md](CONFIG.md) — full schema `.pi/config.yaml`
+- [ARCHITECTURE.md](ARCHITECTURE.md) — design decisions, decision log D1-D18
+- [agents/code-reviewer.md](../agents/code-reviewer.md) — system prompt AI reviewer (rules bot tuân thủ)
