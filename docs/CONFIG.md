@@ -54,16 +54,28 @@ llm:
 
 ### `scope` — scope alignment check (optional)
 
-Khi `enabled: true`, AI reviewer verify MR resolve 1 task:
+Khi `enabled: true`, AI reviewer verify MR resolve 1 task. **AI đọc `.pi/config.yaml`
+(quan `fetch_file`) + system prompt** để biết scope rules — bot KHÔNG hard-enforce
+trước review (skip logic chỉ là `skipTitle/skipBranchRegex`):
 
 - `convention`: branch pattern extract task ID (vd `feat/T-42-*` → `T-42`).
 - `resolvesPattern`: RegExp extract issue từ MR description.
 - `taskIndex`: file roadmap/task list (AI đọc qua `fetch_file` để tra cứu).
 
-### `block` — merge gate
+### `block` — bot approval state (merge gate)
 
-`enabled: true` + GitLab Approval Rule require bot → merge blocked đến khi bot approve.
-Bot `unapprove` ngay khi pipeline mới chạy (revoke approval cũ), `approve` khi review pass.
+`enabled: true` → bot gọi `unapprove` (revoke approval cũ ngay khi pipeline mới chạy)
+- `approve` (khi review pass) qua GitLab API.
+
+**Merge gate** phụ thuộc setup GitLab (xem [CI_SETUP §2](CI_SETUP.md)):
+
+- **Primary (mọi tier)**: protected branch “Pipelines must succeed” — `pi-review`
+  exit 1 → pipeline fail → merge blocked. Không cần `block.enabled`.
+- **+ Approval Rule (Premium+, tùy chọn)**: require bot approval → bot
+  approve/unapprove (`block.enabled: true`) mới unblock. Lớp bảo vệ thêm.
+
+`block.enabled` KHÔNG tự block merge — nó chỉ quản lý approval state. Gate thật nằm ở
+status check / Approval Rule (GitLab project settings).
 
 ### `llm` — model override
 
