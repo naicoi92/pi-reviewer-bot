@@ -91,9 +91,13 @@ Project → Settings → Repository → Protected branches → main
 
 ```
 Project → Settings → CI/CD → Variables
-  GITLAB_API_TOKEN = glpat-...        (masked + protected)
-  ZAI_API_KEY = zai-...               (hoặc OPENAI/ANTHROPIC/DEEPSEEK/...)
+  GITLAB_API_TOKEN = glpat-...        (masked: YES, protected: NO — xem CI_SETUP §3)
+  ZAI_API_KEY = zai-...               (masked: YES, protected: NO)
 ```
+
+> ⚠️ **KHÔNG `Protect variable`** — protected var CHỈ trên protected branch/tag; feature
+> branch MR không được → bot thiếu token. Để `masked: YES`, `protected: NO`. Secrets ở
+> CI/CD vars, KHÔNG vào component inputs (xem [CI_SETUP §3](CI_SETUP.md)).
 
 > Optional: `EXA_API_KEY` (web_search quality; fallback DuckDuckGo free).
 

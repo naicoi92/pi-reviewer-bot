@@ -94,9 +94,19 @@ Bot gọi `unapprove`/`approve` qua API (`block.enabled: true` trong config). MR
 
 ```
 Project → Settings → CI/CD → Variables
-  GITLAB_API_TOKEN = glpat-...        (token từ §1, masked + protected)
-  ZAI_API_KEY = zai-...               (hoặc OPENAI/ANTHROPIC/DEEPSEEK/...)
+  GITLAB_API_TOKEN = glpat-...        (masked: YES, protected: NO — xem ⚠️)
+  ZAI_API_KEY = zai-...               (masked: YES, protected: NO)
 ```
+
+> ⚠️ **KHÔNG đánh dấu `Protect variable`** cho token/LLM key khi bot review MR pipeline.
+> Protected variable CHỈ available trên protected branch/tag — feature branch (MR)
+> KHÔNG protected → token vắng trong pipeline → bot fail (log: `GITLAB_API_TOKEN not set`).
+> Để `protected: NO`, `masked: YES` (giấu trong log). Muốn cả 2: bật setting "merge
+> request pipelines can access protected variables" (Project → Settings → CI/CD).
+>
+> Secrets → CI/CD Variables (masked), **KHÔNG vào component `inputs:`**. Inputs chỉ cho
+> job-shape không nhạy cảm (stage/needs/image). **3 lớp config**: component inputs (job
+> shape) + CI/CD vars (secrets) + `.pi/config.yaml` (review behavior).
 
 Optional: `EXA_API_KEY` (web_search quality; fallback DuckDuckGo free).
 
@@ -191,6 +201,12 @@ succeed") — hoạt động Free+, đủ block merge.
 ### Job fail: `GITLAB_API_TOKEN === CI_JOB_TOKEN`
 
 Token sai. Dùng PAT/Project Access Token (scope api), KHÔNG `CI_JOB_TOKEN`.
+
+### Log: `[gitlab] GITLAB_API_TOKEN not set` (token vắng trong MR pipeline)
+
+Token bị đánh dấu **Protect variable** → chỉ available trên protected branch/tag,
+KHÔNG trên feature branch MR. Sửa: edit variable, bỏ `Protect variable`, giữ `Masked`.
+(Hoặc bật "MR pipelines can access protected variables".)
 
 ### Job fail: `Missing CI env var: CI_MERGE_REQUEST_IID`
 
