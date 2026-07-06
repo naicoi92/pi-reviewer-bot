@@ -141,20 +141,31 @@ export function fetchUrlsTool(_ctx: ToolContext) {
 		name: "fetch_urls",
 		label: "Fetch URLs",
 		description:
-			"Đọc nội dung 1 hoặc nhiều URL → markdown sạch. Extraction: Readability, " +
-			"Jina Reader fallback cho SPA/JS-heavy. SSRF guard (DNS-resolve, block private IP). " +
-			"Hỗ trợ docs pages, changelog, security advisory. Mọi result được lưu — " +
-			"dùng get_search_content(responseId) retrieve full content. " +
+			"Đọc NHIỀU URL song song → markdown sạch (1 call = fetch tất cả). " +
+			'TRUYỀN ARRAY urls=["...","..."] để fetch nhiều URL cùng lúc — KHÔNG call từng URL riêng. ' +
+			"Chấp nhận 1 string làm shorthand cho single URL. " +
+			"Extraction: Readability + Jina Reader fallback (SPA/JS-heavy). SSRF guard (DNS-resolve, block private IP). " +
+			"Mọi result được lưu — dùng get_search_content(responseId) retrieve full content. " +
 			"Dùng sau web_search hoặc khi đã biết URL chính xác.",
 		promptSnippet:
-			"fetch_urls(url|urls, timeoutMs?): read URL(s) → clean markdown. Readability + Jina fallback. Supports docs, changelog, advisory. Trigger: sau web_search, verify dep/API docs.",
+			"fetch_urls(urls: string[], timeoutMs?): fetch NHIỀU URL song song trong 1 call (truyền array). Readability + Jina fallback. Luôn batch — KHÔNG call riêng từng URL. Trigger: sau web_search, verify dep/API/CVE docs.",
 		parameters: Type.Object({
 			url: Type.Union(
 				[
-					Type.String({ description: "URL đầy đủ (http/https)." }),
-					Type.Array(Type.String(), { description: "Nhiều URL (parallel)." }),
+					Type.Array(Type.String(), {
+						description:
+							"Danh sách URL (http/https) — fetch song song. PREFERRED: luôn truyền array kể cả 1 URL.",
+					}),
+					Type.String({
+						description:
+							"Shorthand cho 1 URL. Nếu truyền string, internally wrap thành [string].",
+					}),
 				],
-				{ description: "1 URL (string) hoặc nhiều URL (string[])." },
+				{
+					description:
+						"URL(s) cần fetch. ARRAY = primary mode (batch nhiều URL 1 call, song song). " +
+						"string = shorthand cho 1 URL. KHÔNG call fetch_urls nhiều lần cho nhiều URL — truyền 1 array.",
+				},
 			),
 			timeoutMs: Type.Optional(
 				Type.Number({
