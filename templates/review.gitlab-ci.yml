@@ -26,8 +26,7 @@ pi-review:
   needs:
     - job: test
     - job: build
-  variables:
-    # Bot dùng GitLab API (diff/comments/approve), không cần checkout source.
-    GIT_STRATEGY: none
+  # GIT_STRATEGY: fetch (mặc định) — runner checkout source branch vào cwd.
+  # fetch_files tool cần filesystem để AI verify context ngoài diff.
   script:
     - /app/pi-reviewer-bot

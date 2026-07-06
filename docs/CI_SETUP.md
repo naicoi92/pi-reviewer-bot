@@ -139,7 +139,7 @@ Hoặc copy `templates/review.gitlab-ci.yml` vào `.gitlab-ci.yml`. Chỉnh `nee
 job names pipeline của bạn.
 
 Cả 2: job `pi-review` ở `stage: review`, `rules: merge_request_event` (chỉ MR),
-`GIT_STRATEGY: none` (bot dùng GitLab API, không checkout).
+`GIT_STRATEGY: fetch` (runner checkout source branch cho `fetch_files` tool).
 
 ---
 

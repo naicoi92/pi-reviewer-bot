@@ -36,7 +36,7 @@ pi-review:
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
   needs: $[[ inputs.needs ]]
-  variables:
-    GIT_STRATEGY: none
+  # GIT_STRATEGY: fetch (mặc định) — runner checkout source branch vào cwd.
+  # fetch_files tool cần filesystem để AI verify context ngoài diff.
   script:
     - /app/pi-reviewer-bot

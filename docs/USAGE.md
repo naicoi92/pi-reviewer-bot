@@ -129,7 +129,8 @@ Hoặc copy nội dung `templates/review.gitlab-ci.yml` vào `.gitlab-ci.yml`. C
 `needs:` cho khớp job names pipeline của bạn.
 
 Cả 2 đặt job `pi-review` ở `stage: review`, `rules: merge_request_event`
-(chỉ chạy trên MR), `GIT_STRATEGY: none` (bot dùng GitLab API, không checkout).
+(chỉ chạy trên MR), `GIT_STRATEGY: fetch` (runner checkout source branch để
+`fetch_files` tool đọc context ngoài diff).
 
 ### 3.6 (Optional) Local debug
 
