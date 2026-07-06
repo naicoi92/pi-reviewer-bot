@@ -5,197 +5,128 @@
 [![Docker](https://github.com/naicoi92/pi-reviewer-bot/pkgs/container/pi-reviewer-bot)](https://github.com/naicoi92/pi-reviewer-bot/pkgs/container/pi-reviewer-bot)
 
 **AI code review bot cho GitLab** — chạy như một **GitLab CI job** cuối pipeline,
-dùng [Pi Coding Agent SDK](https://pi.dev) để review, và tự approve/request_changes
+dùng [Pi Coding Agent SDK](https://pi.dev) review diff, tự approve/request_changes
 qua tool calls. Không còn webhook server (D1-revised).
 
-Bot hỗ trợ **bất kỳ LLM provider nào** Pi hỗ trợ (40+): Z.ai GLM, OpenAI GPT,
-Anthropic Claude, DeepSeek, Google Gemini, Bedrock, Vertex, Ollama... Bạn chỉ cần
-set API key của provider muốn dùng.
+Multi-provider (40+): Z.ai GLM, OpenAI, Anthropic, DeepSeek, Gemini, Ollama...
+
+> 📖 **[Hướng dẫn sử dụng đầy đủ](docs/USAGE.md)** — setup, config, luồng làm việc,
+> troubleshooting, migration. Bắt đầu từ đó.
 
 ## Documentation
 
-| Doc | Audience | Purpose |
-|---|---|---|
-| **[📖 CI Setup Guide](docs/CI_SETUP.md)** | Project owner | PAT + Approval Rule + CI variables + include template |
-| **[📖 Config Schema](docs/CONFIG.md)** | Project owner | `.pi/config.yaml` full schema + examples |
-| **[📖 Architecture](docs/ARCHITECTURE.md)** | Maintainer | Design decisions, decision log (D1-D16) |
-| **[📖 Skills](docs/SKILLS.md)** | Developer ở project đã setup bot | Luồng MR → review → feedback hàng ngày |
+| Doc | Purpose |
+|---|---|
+| **[📖 Hướng dẫn sử dụng đầy đủ](docs/USAGE.md)** | Setup → config → daily workflow → troubleshooting → migrate (bắt đầu ở đây) |
+| **[📖 CI Setup](docs/CI_SETUP.md)** | PAT + Approval Rule + CI variables + include template (Component/raw) |
+| **[📖 Config Schema](docs/CONFIG.md)** | `.pi/config.yaml` full reference |
+| **[📖 Architecture](docs/ARCHITECTURE.md)** | Design + decision log (D1-D17) |
 
 ---
 
-## 🚀 Use bot cho project của bạn (CI-job mode)
+## 🚀 Quickstart (tóm tắt)
 
-### Bước 1 — Tạo Project Access Token
+**Project side** (xem [USAGE](docs/USAGE.md) chi tiết):
 
-```
-Project → Settings → Access Tokens → pi-reviewer-bot, Role: Developer, Scopes: api
-```
+1. **Token**: Project → Settings → Access Tokens → `pi-reviewer-bot`, Role Developer, scope `api`.
+2. **Approval Rule**: Settings → Merge requests → require `@pi-reviewer-bot` (để block merge).
+3. **CI/CD Variables**: `GITLAB_API_TOKEN` + `ZAI_API_KEY` (masked).
+4. **Include template** trong `.gitlab-ci.yml`:
 
-> `CI_JOB_TOKEN` KHÔNG dùng được (chỉ đọc MR endpoints). Phải là Project Access
-> Token hoặc user PAT.
+   ```yaml
+   # Option A: Component (preferred, cần GitLab catalog project)
+   include:
+     - component: $CI_SERVER_FQDN/<org>/pi-reviewer-bot/review@~1.0
+       inputs: { needs: [test, build] }
+   # Option B: Raw (GitHub-hosted, chạy ngay)
+   # include:
+   #   - remote: '<github-raw-url>/templates/review.gitlab-ci.yml'
+   ```
 
-### Bước 2 — Add bot làm required Approval Rule
+5. **(Optional) `.pi/config.yaml`**: `block: { enabled: true }`, `llm: { model: zai/glm-5.2 }`.
 
-```
-Project → Settings → Merge requests → Approval rules
-  Require bot review, Approvals required: 1, Approvers: @pi-reviewer-bot
-```
+Mở MR → pipeline chạy → `pi-review` job review → bot comment + approve/request_changes.
 
-### Bước 3 — Set CI/CD Variables
-
-```
-Project → Settings → CI/CD → Variables
-  GITLAB_API_TOKEN = glpat-...        (masked + protected)
-  ZAI_API_KEY = zai-...               (hoặc OPENAI_API_KEY/ANTHROPIC_API_KEY/...)
-```
-
-### Bước 4 — Include CI template
-
-**Option A (preferred):** CI Component với `inputs` (stage/needs/image), versioned:
-
-```yaml
-include:
-  - component: $CI_SERVER_FQDN/<gitlab-org>/pi-reviewer-bot/review@~1.0
-    inputs:
-      needs: [lint, test, build]
-```
-
-**Option B (raw, GitHub-hosted):**
-
-```yaml
-# .gitlab-ci.yml
-include:
-  - remote: '<github-raw-url>/templates/review.gitlab-ci.yml'
-```
-
-Job `pi-review` chạy ở `stage: review`, `rules: merge_request_event`,
-`needs: [test, build]` (CI native đợi pass). Chỉnh `needs:` cho khớp pipeline.
-
-> Component cần GitLab catalog project (bot source ở GitHub). Xem docs/CI_SETUP.md.
-
-📖 **Chi tiết**: [docs/CI_SETUP.md](docs/CI_SETUP.md) — gồm migrate từ webhook,
-exit-code contract, troubleshooting.
-
-### Bước 5 — (Optional) Per-project config
-
-```yaml
-# .pi/config.yaml
-review:
-  language: vi
-  limits: { maxToolCalls: 30, timeoutMs: 300000 }
-block:
-  enabled: true
-llm:
-  model: zai/glm-5.2
-```
-
-> `ci.*` đã LOẠI BỎ — CI native lo wait. Env knobs (`DEFAULT_MODEL`,
-> `MAX_TOOL_CALLS_PER_REVIEW`, `REVIEW_TIMEOUT_MS`) đã chuyển sang config.yaml.
+> ⚠️ `CI_JOB_TOKEN` **không dùng được** (chỉ đọc MR) — phải là Project Access Token / user PAT.
 
 ---
 
 ## Kiến trúc — Mức 3 Full Tool
 
-AI reviewer có **12 tools** và tự decide approve/request_changes qua tool call
-(không parse verdict regex):
+AI reviewer có **12 tools**, tự decide approve/request_changes (không parse verdict):
 
 | Nhóm | Tools |
 |---|---|
-| **Read context** | `fetch_file`, `get_issue`, `list_mr_comments`, `list_mr_commits`, `list_wiki_pages`, `get_wiki_page` |
-| **Web lookup** | `web_search`, `fetch_url` — tra cứu version mới nhất, API docs, CVE |
-| **Write verdict** | `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` |
+| **Read** | `fetch_file`, `get_issue`, `list_mr_comments`, `list_mr_commits`, `list_wiki_pages`, `get_wiki_page` |
+| **Web lookup** | `web_search`, `fetch_url` — tra version/API/CVE (SSRF guard) |
+| **Write** | `post_inline_comment`, `post_summary`, `approve_mr`, `request_changes` |
 
 Guardrail: `approve_mr` block nếu chưa `post_summary` hoặc còn critical unresolved.
 
+## Exit-code contract
+
+| Outcome | exit | MR |
+|---|---|---|
+| approved / changes_requested | 0 | unblocked / blocked (intentional, job pass) |
+| inconclusive / error | 1 | blocked (user re-run pipeline) |
+
+Job fail = bot lỗi → MR blocked (safe default). Xem [USAGE §7](docs/USAGE.md).
+
 ## Tính năng
 
-- ✅ **Multi-provider** — Z.ai / OpenAI / Anthropic / DeepSeek / Gemini / Ollama / bất kỳ Pi provider
-- ✅ **12 tools** — fetch context, search internet, post inline comments, approve, request changes
-- ✅ **Inline line comments** — DiffNote qua GitLab Discussions API với position hash
-- ✅ **Web lookup** — verify dependency version, API deprecation, CVE (`web_search` + `fetch_url`, SSRF guard)
-- ✅ **Merge gate** — block MR cho đến khi bot approve (`block.enabled` + GitLab Approval Rule)
+- ✅ **Multi-provider** — Z.ai/OpenAI/Anthropic/DeepSeek/Gemini/Ollama
+- ✅ **12 tools** — fetch context, web search, inline comments, approve/changes
 - ✅ **CI native wait** — job đặt cuối pipeline (`needs:`), không state in-memory
+- ✅ **Merge gate** — block MR đến khi bot approve
 - ✅ **Per-project config** — `.pi/config.yaml` (review/scope/block/llm/limits)
-- ✅ **Guardrail chống hallucinate approve** — phải post_summary + 0 critical
-- ✅ **Fail-safe** — job fail (exit 1) nếu review inconclusive/error → MR blocked, user re-run
+- ✅ **Guardrail** — phải post_summary + 0 critical trước approve
+- ✅ **CI Component** — versioned, `inputs` (stage/needs/image), hoặc raw include
+
+## LLM Providers
+
+Set API key (CI/CD Variable) của provider muốn dùng — Pi auto-detect:
+
+| Provider | Env var | Cost |
+|---|---|---|
+| **Z.ai** (recommend) | `ZAI_API_KEY` | $12.6/mo flat |
+| OpenAI | `OPENAI_API_KEY` | pay-as-you-go |
+| Anthropic | `ANTHROPIC_API_KEY` | pay-as-you-go |
+| DeepSeek | `DEEPSEEK_API_KEY` | rẻ nhất |
+| Gemini | `GOOGLE_GENERATIVE_AI_API_KEY` | free tier + paid |
+| Ollama (local) | — | free |
+
+Model: `llm.model` (`.pi/config.yaml`) > Pi auto-detect. List: `pi --list-models`.
 
 ## Cấu trúc repo
 
 ```
 pi-reviewer-bot/
-├── Dockerfile                  # Multi-stage: Bun --compile + Alpine (no EXPOSE/healthcheck)
-├── package.json                # Bun project deps (no hono)
-├── templates/
-│   └── review.gitlab-ci.yml    # CI job template (include vào .gitlab-ci.yml)
-├── agents/
-│   ├── code-reviewer.md        # BOT-OWNED system prompt — load runtime, KHÔNG copy
-│   └── REVIEW_RULES.template.md
 ├── src/
-│   ├── index.ts                # CLI entrypoint (CI-job mode, exit-code contract)
-│   ├── context.ts              # mrContextFromEnv() — đọc CI predefined vars
-│   ├── review.ts               # performReview orchestration + deriveOutcome
-│   ├── gitlab.ts               # GitLab API client (approve, comment, get_issue, ...)
-│   ├── pi.ts                   # Pi SDK wrapper — createAgentSession + subscribe
-│   ├── config.ts               # .pi/config.yaml loader + mergeConfig
-│   ├── repo.ts                 # repoDir (process.cwd) + readFileOrNull
-│   ├── stats.ts                # emitStatsLine (stdout JSON)
-│   ├── ssrf.ts                 # SSRF guard cho fetch_url
-│   ├── types.ts                # MR data types (webhook payload types removed)
-│   └── tools/                  # 12 custom tools (defineTool)
-├── test/
-│   ├── context.test.ts         # mrContextFromEnv tests
-│   ├── config.test.ts          # config schema (limits, ci.* removed)
-│   ├── review.test.ts          # deriveOutcome (exit-code contract)
-│   ├── tools.test.ts           # tool registration
-│   └── ssrf.test.ts            # SSRF guard
-└── docs/
-    ├── CI_SETUP.md             # CI-job onboard guide
-    ├── CONFIG.md               # .pi/config.yaml schema
-    └── ARCHITECTURE.md         # Design + decision log
+│   ├── index.ts            # CLI entrypoint (exit-code contract)
+│   ├── context.ts          # mrContextFromEnv (CI predefined vars)
+│   ├── review.ts           # performReview + deriveOutcome + shouldSkip
+│   ├── gitlab.ts           # GitLab API client
+│   ├── pi.ts               # Pi SDK wrapper
+│   ├── config.ts           # .pi/config.yaml loader + mergeConfig
+│   ├── repo.ts stats.ts ssrf.ts types.ts
+│   └── tools/              # 12 tools
+├── templates/
+│   ├── review.yml          # CI Component (spec.inputs)
+│   └── review.gitlab-ci.yml # Raw include fallback
+├── agents/                 # BOT-OWNED system prompt
+├── docs/                   # USAGE, CI_SETUP, CONFIG, ARCHITECTURE
+├── Dockerfile              # Bun --compile + Alpine (no EXPOSE)
+└── package.json            # 1.0.0, no hono
 ```
-
-## LLM Providers
-
-Bot dùng [Pi Coding Agent SDK](https://pi.dev) → tự hỗ trợ 40+ providers. Set API
-key env var (CI/CD Variable) của provider bạn muốn:
-
-| Provider | Env var | Cost |
-|---|---|---|
-| **Z.ai** (recommend) | `ZAI_API_KEY` | $12.6/mo flat (Coding Plan) |
-| OpenAI | `OPENAI_API_KEY` | Pay-as-you-go |
-| Anthropic | `ANTHROPIC_API_KEY` | Pay-as-you-go |
-| DeepSeek | `DEEPSEEK_API_KEY` | Pay-as-you-go (rẻ nhất) |
-| Google Gemini | `GOOGLE_GENERATIVE_AI_API_KEY` | Free tier + paid |
-| Ollama (local) | (không cần key) | Free |
-
-Model resolution: `llm.model` (`.pi/config.yaml`) > Pi auto-detect (first provider
-có key). Full list: `pi --list-models` hoặc <https://pi.dev/models>
-
-## Tech Stack
-
-| Layer | Tech |
-|---|---|
-| Runtime | [Bun](https://bun.sh) 1.1+ (compiled standalone binary) |
-| Entry | CLI 1-shot (CI job) — không HTTP server |
-| GitLab API | [@gitbeaker/rest](https://gitlab.com/gitlab-org/gitbeaker/) |
-| AI agent | [Pi Coding Agent](https://pi.dev) SDK (in-process, custom tools) |
-| LLM | Bất kỳ Pi provider |
-| Image | Alpine (~115MB, multi-arch amd64+arm64) trên GHCR |
 
 ## Develop
 
 ```bash
 bun install
-bun test               # unit tests
-bun run typecheck      # strict TypeScript
+bun test               # 52 tests
+bun run typecheck      # strict TS
 
-# Local debug (mock CI env vars):
-CI_MERGE_REQUEST_IID=42 CI_PROJECT_ID=100 CI_PROJECT_PATH=acme/demo \
-  CI_PROJECT_URL=https://gitlab.com/acme/demo \
-  CI_MERGE_REQUEST_SOURCE_BRANCH_NAME=feat/x CI_MERGE_REQUEST_TARGET_BRANCH_NAME=main \
-  CI_MERGE_REQUEST_SOURCE_BRANCH_SHA=abc123 CI_API_V4_URL=https://gitlab.com/api/v4 \
-  GITLAB_API_TOKEN=glpat-... ZAI_API_KEY=zai-... \
-  bun src/index.ts
+# Local debug (mock CI env): xem docs/USAGE.md §3.6
 ```
 
 ## License

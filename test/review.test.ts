@@ -42,12 +42,18 @@ describe("shouldSkip — WIP/DNR filter", () => {
 		expect(shouldSkip(DEFAULT_CONFIG, "WIP: fix bug", "feat/x")).toBe(true);
 	});
 	test("no match → false", () => {
-		expect(shouldSkip(DEFAULT_CONFIG, "feat: add login", "feat/login")).toBe(false);
+		expect(shouldSkip(DEFAULT_CONFIG, "feat: add login", "feat/login")).toBe(
+			false,
+		);
 	});
 	test("empty regex → never skip", () => {
 		const cfg: ProjectConfig = {
 			...DEFAULT_CONFIG,
-			review: { ...DEFAULT_CONFIG.review, skipTitleRegex: "", skipBranchRegex: "" },
+			review: {
+				...DEFAULT_CONFIG.review,
+				skipTitleRegex: "",
+				skipBranchRegex: "",
+			},
 		};
 		expect(shouldSkip(cfg, "WIP anything", "wip/x")).toBe(false);
 	});
