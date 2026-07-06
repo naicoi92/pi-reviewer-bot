@@ -14,6 +14,7 @@ const FULL_ENV: Record<string, string | undefined> = {
 	CI_MERGE_REQUEST_TARGET_BRANCH_NAME: "main",
 	CI_MERGE_REQUEST_SOURCE_BRANCH_SHA: "abc123def",
 	CI_MERGE_REQUEST_TARGET_BRANCH_SHA: "fed654cba",
+	CI_COMMIT_SHA: "defaultcommitsha",
 };
 
 describe("mrContextFromEnv", () => {
@@ -45,6 +46,29 @@ describe("mrContextFromEnv", () => {
 		expect(() =>
 			mrContextFromEnv({ ...FULL_ENV, CI_PROJECT_ID: "abc" }),
 		).toThrow(ContextError);
+	});
+
+	test("sourceSha falls back to CI_COMMIT_SHA when *_SOURCE_BRANCH_SHA missing (D18)", () => {
+		const { CI_MERGE_REQUEST_SOURCE_BRANCH_SHA: _s, ...env } = FULL_ENV;
+		const ctx = mrContextFromEnv({ ...env, CI_COMMIT_SHA: "fallbackhead" });
+		expect(ctx.sourceSha).toBe("fallbackhead");
+	});
+
+	test("sourceSha prefers CI_MERGE_REQUEST_SOURCE_BRANCH_SHA when both set", () => {
+		const ctx = mrContextFromEnv({
+			...FULL_ENV,
+			CI_COMMIT_SHA: "fallbackhead",
+		});
+		expect(ctx.sourceSha).toBe("abc123def");
+	});
+
+	test("targetSha falls back to CI_MERGE_REQUEST_DIFF_BASE_SHA when *_TARGET_BRANCH_SHA missing (D18)", () => {
+		const { CI_MERGE_REQUEST_TARGET_BRANCH_SHA: _t, ...env } = FULL_ENV;
+		const ctx = mrContextFromEnv({
+			...env,
+			CI_MERGE_REQUEST_DIFF_BASE_SHA: "fallbackbase",
+		});
+		expect(ctx.targetSha).toBe("fallbackbase");
 	});
 
 	test("sourceSha optional var missing still ok (targetSha optional)", () => {
