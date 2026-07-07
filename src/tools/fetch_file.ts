@@ -103,28 +103,15 @@ export function fetchFileTool(ctx: ToolContext) {
 		description:
 			"Đọc NHIỀU file song song từ repo clone để verify context (imports, method signatures, neighbour code). " +
 			'TRUYỀN ARRAY paths=["...","..."] để đọc nhiều file cùng lúc — KHÔNG call từng file riêng. ' +
-			"Chấp nhận 1 string làm shorthand cho single file. " +
 			"Use when the diff alone is not enough to judge correctness.",
 		promptSnippet:
-			"fetch_files(paths: string[]): đọc NHIỀU file song song trong 1 call (truyền array). Luôn batch — KHÔNG call riêng từng file. Dùng verify imports/signature/neighbour code ngoài diff.",
+			"fetch_files(paths: string[]): đọc NHIỀU file song song trong 1 call (truyền array). LUÔN truyền array, kể cả 1 file: ['path']. Dùng verify imports/signature/neighbour code ngoài diff.",
 		parameters: Type.Object({
-			path: Type.Union(
-				[
-					Type.Array(Type.String(), {
-						description:
-							"Danh sách path relative to repo root — đọc song song. PREFERRED: luôn truyền array kể cả 1 file. e.g. ['src/lib/auth.ts', 'src/utils/token.ts']",
-					}),
-					Type.String({
-						description:
-							"Shorthand cho 1 file. Nếu truyền string, internally wrap thành [string].",
-					}),
-				],
-				{
-					description:
-						"File path(s) cần đọc. ARRAY = primary mode (batch nhiều file 1 call, song song). " +
-						"string = shorthand cho 1 file. KHÔNG call fetch_files nhiều lần cho nhiều file — truyền 1 array.",
-				},
-			),
+			path: Type.Array(Type.String(), {
+				description:
+					"Danh sách path relative to repo root — đọc song song. LUÔN truyền array, kể cả 1 file. e.g. ['src/lib/auth.ts', 'src/utils/token.rs']",
+				minItems: 1,
+			}),
 		}),
 		async execute(_id, params) {
 			const pathsRaw = params.path;

@@ -71,7 +71,7 @@ AI reviewer có 13 custom tools:
 
 ### Read (không mutate state)
 
-1. `fetch_files(paths)` — đọc NHIỀU file song song verify context (array preferred, string shorthand)
+1. `fetch_files(paths)` — đọc NHIỀU file song song verify context (truyền array, bắt buộc)
 2. `get_issue(iid)` — GitLab issue gốc + comments + linked MRs
 3. `list_mr_comments()` — existing comments (idempotent re-review)
 4. `list_mr_commits()` — commit history
