@@ -143,30 +143,17 @@ export function fetchUrlsTool(_ctx: ToolContext) {
 		description:
 			"Đọc NHIỀU URL song song → markdown sạch (1 call = fetch tất cả). " +
 			'TRUYỀN ARRAY urls=["...","..."] để fetch nhiều URL cùng lúc — KHÔNG call từng URL riêng. ' +
-			"Chấp nhận 1 string làm shorthand cho single URL. " +
 			"Extraction: Readability + Jina Reader fallback (SPA/JS-heavy). SSRF guard (DNS-resolve, block private IP). " +
 			"Mọi result được lưu — dùng get_search_content(responseId) retrieve full content. " +
 			"Dùng sau web_search hoặc khi đã biết URL chính xác.",
 		promptSnippet:
-			"fetch_urls(urls: string[], timeoutMs?): fetch NHIỀU URL song song trong 1 call (truyền array). Readability + Jina fallback. Luôn batch — KHÔNG call riêng từng URL. Trigger: sau web_search, verify dep/API/CVE docs.",
+			"fetch_urls(urls: string[], timeoutMs?): fetch NHIỀU URL song song trong 1 call (truyền array). Readability + Jina fallback. LUÔN truyền array, kể cả 1 URL. Trigger: sau web_search, verify dep/API/CVE docs.",
 		parameters: Type.Object({
-			url: Type.Union(
-				[
-					Type.Array(Type.String(), {
-						description:
-							"Danh sách URL (http/https) — fetch song song. PREFERRED: luôn truyền array kể cả 1 URL.",
-					}),
-					Type.String({
-						description:
-							"Shorthand cho 1 URL. Nếu truyền string, internally wrap thành [string].",
-					}),
-				],
-				{
-					description:
-						"URL(s) cần fetch. ARRAY = primary mode (batch nhiều URL 1 call, song song). " +
-						"string = shorthand cho 1 URL. KHÔNG call fetch_urls nhiều lần cho nhiều URL — truyền 1 array.",
-				},
-			),
+			url: Type.Array(Type.String(), {
+				description:
+					"Danh sách URL (http/https) — fetch song song. LUÔN truyền array, kể cả 1 URL. e.g. ['https://docs.rs/tokio', 'https://crates.io/crates/serde']",
+				minItems: 1,
+			}),
 			timeoutMs: Type.Optional(
 				Type.Number({
 					description: `Timeout mỗi fetch ms (default ${FETCH_TIMEOUT_DEFAULT_MS}).`,

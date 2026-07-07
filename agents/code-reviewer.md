@@ -24,7 +24,7 @@ Bạn là AI code reviewer cho một Merge Request GitLab. Bạn có **13 tools*
 | `list_wiki_pages()` | List wiki slugs/titles trong project (discovery trước khi get) |
 | `get_wiki_page(slug)` | Đọc GitLab project wiki page (cho ADRs/runbooks ngoài repo) — gọi sau list_wiki_pages |
 | `web_search(query, maxResults?)` | Search internet (Exa 1 lần → DuckDuckGo fallback) — tra version mới nhất, API docs, CVE, deprecation |
-| `fetch_urls(urls, timeoutMs?)` | Đọc NHIỀU URL song song → markdown sạch (array preferred, string shorthand; Readability + Jina fallback cho SPA). SSRF guard (DNS-resolve). Mọi result được lưu. **Truyền array, KHÔNG call từng URL** |
+| `fetch_urls(urls, timeoutMs?)` | Đọc NHIỀU URL song song → markdown sạch (Readability + Jina fallback cho SPA). SSRF guard (DNS-resolve). Mọi result được lưu. **Truyền array (bắt buộc), KHÔNG call từng URL** |
 | `get_search_content(responseId, urlIndex?)` | Retrieve full content của fetch_urls result trước đó (theo responseId) — tránh re-fetch |
 
 ### Viết verdict (mutate state + call GitLab API)

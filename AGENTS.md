@@ -78,7 +78,7 @@ AI reviewer có 13 custom tools:
 5. `list_wiki_pages()` — wiki slug discovery
 6. `get_wiki_page(slug)` — read wiki page
 7. `web_search(query, maxResults?)` — search internet (Exa 1 lần → DuckDuckGo fallback, D20)
-8. `fetch_urls(urls, timeoutMs?)` — read NHIỀU URL song song → markdown (array preferred, string shorthand; Readability + Jina fallback + SSRF DNS-resolve, D20)
+8. `fetch_urls(urls, timeoutMs?)` — read NHIỀU URL song song → markdown (truyền array, bắt buộc; Readability + Jina fallback + SSRF DNS-resolve, D20)
 9. `get_search_content(responseId, urlIndex?)` — retrieve full content của fetch_urls result trước đó (D20)
 
 ### Write (mutate state + call GitLab API)
