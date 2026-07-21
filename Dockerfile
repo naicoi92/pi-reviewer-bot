@@ -24,7 +24,10 @@
 # ─────────────────────────────────────────────────────────────
 
 # ─── Stage 1: Build standalone binary với Bun --compile ──────
-FROM oven/bun:1.1-alpine AS builder
+# latest để khớp với lockfile format user generate local (Bun 1.2+ dùng text bun.lock,
+# 1.1 chỉ đọc binary bun.lockb → fail nếu repo có bun.lock text).
+# -alpine để binary musl tương thích với Alpine runtime stage 2.
+FROM oven/bun:alpine AS builder
 
 # file utility để verify binary built (debug)
 RUN apk add --no-cache file

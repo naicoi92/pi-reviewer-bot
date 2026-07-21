@@ -26,8 +26,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+        # latest để khớp với bất kỳ lockfile format nào user generate local
         with:
-          bun-version: 1.1
+          bun-version: latest
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
