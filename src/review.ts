@@ -17,7 +17,7 @@ import {
 	type PiReviewResult,
 } from "./pi.ts";
 import type { ProjectConfig } from "./config.ts";
-import { repoDir } from "./context.ts";
+import { repoDir, enrichShaFromMr } from "./context.ts";
 
 export type ReviewOutcome =
 	| {
@@ -89,10 +89,18 @@ export async function performReview(
 
 	try {
 		// CI env không có title/description → enrich qua fetchMr (best-effort).
+		// D21: cũng enrich sourceSha/targetSha từ diff_refs khi CI env thiếu
+		// (defense-in-depth sau D18 — fix postDiffNote block khi cả 2 env SHA rỗng).
 		try {
 			const mr = await fetchMr(ctx);
 			ctx.title = mr.title;
 			ctx.description = mr.description ?? "";
+			const sha = enrichShaFromMr(ctx, mr);
+			if (sha.sourceShaChanged || sha.targetShaChanged) {
+				log(
+					`enriched SHA from diff_refs — source=${sha.sourceShaChanged} target=${sha.targetShaChanged}`,
+				);
+			}
 		} catch (e) {
 			log(`warn — fetchMr failed: ${e instanceof Error ? e.message : e}`);
 		}

@@ -3,7 +3,14 @@
  * Run: `bun test`
  */
 import { describe, expect, test } from "bun:test";
-import { mrContextFromEnv, ContextError, repoDir } from "../src/context.ts";
+import {
+	mrContextFromEnv,
+	ContextError,
+	repoDir,
+	enrichShaFromMr,
+} from "../src/context.ts";
+import type { MergeRequestObjectAttributes } from "../src/types.ts";
+import type { MrContext } from "../src/gitlab.ts";
 
 const FULL_ENV: Record<string, string | undefined> = {
 	CI_PROJECT_ID: "100",
@@ -85,5 +92,104 @@ describe("repoDir", () => {
 
 	test("falls back to process.cwd()", () => {
 		expect(repoDir({})).toBe(process.cwd());
+	});
+});
+
+// ─── enrichShaFromMr (D21 — defense-in-depth SHA resolve) ────────────────
+// Regression: postDiffNote block toàn bộ inline comments với cùng error khi
+// CI_MERGE_REQUEST_*_BRANCH_SHA + CI_MERGE_REQUEST_DIFF_BASE_SHA đều empty
+// → targetSha undefined. Fix: enrich từ fetchMr().diff_refs.
+
+function mrFixture(
+	diffRefs?: { base_sha: string; head_sha: string; start_sha: string },
+): MergeRequestObjectAttributes {
+	return {
+		iid: 42,
+		title: "feat: x",
+		state: "opened",
+		action: "open",
+		draft: false,
+		source_branch: "feat/x",
+		target_branch: "main",
+		source_project_id: 1,
+		target_project_id: 1,
+		url: "https://gitlab.example/acme/demo/-/merge_requests/42",
+		diff_refs: diffRefs,
+	};
+}
+
+function ctxFixture(overrides: Partial<MrContext> = {}): MrContext {
+	return {
+		projectId: 1,
+		mrIid: 42,
+		projectPath: "acme/demo",
+		sourceBranch: "feat/x",
+		targetBranch: "main",
+		title: "",
+		description: "",
+		webUrl: "https://gitlab.example/acme/demo/-/merge_requests/42",
+		...overrides,
+	};
+}
+
+describe("enrichShaFromMr — D21 defense-in-depth SHA", () => {
+	test("enrich sourceSha + targetSha khi undefined, từ diff_refs (base/head)", () => {
+		const ctx = ctxFixture({ sourceSha: undefined, targetSha: undefined });
+		const mr = mrFixture({
+			base_sha: "baseABC",
+			head_sha: "headXYZ",
+			start_sha: "baseABC",
+		});
+		const res = enrichShaFromMr(ctx, mr);
+		expect(ctx.sourceSha).toBe("headXYZ");
+		expect(ctx.targetSha).toBe("baseABC");
+		expect(res).toEqual({
+			sourceShaChanged: true,
+			targetShaChanged: true,
+		});
+	});
+
+	test("KHÔNG override SHA đã set — CI env ưu tiên (layer order)", () => {
+		const ctx = ctxFixture({ sourceSha: "envSrc", targetSha: "envTgt" });
+		const mr = mrFixture({
+			base_sha: "baseABC",
+			head_sha: "headXYZ",
+			start_sha: "baseABC",
+		});
+		const res = enrichShaFromMr(ctx, mr);
+		expect(ctx.sourceSha).toBe("envSrc");
+		expect(ctx.targetSha).toBe("envTgt");
+		expect(res).toEqual({
+			sourceShaChanged: false,
+			targetShaChanged: false,
+		});
+	});
+
+	test("diff_refs undefined → no-op, no mutation", () => {
+		const ctx = ctxFixture({ sourceSha: undefined, targetSha: undefined });
+		const mr = mrFixture(undefined);
+		const res = enrichShaFromMr(ctx, mr);
+		expect(ctx.sourceSha).toBeUndefined();
+		expect(ctx.targetSha).toBeUndefined();
+		expect(res).toEqual({
+			sourceShaChanged: false,
+			targetShaChanged: false,
+		});
+	});
+
+	test("partial enrich — chỉ targetSha undefined, sourceSha đã set", () => {
+		const ctx = ctxFixture({ sourceSha: "envSrc", targetSha: undefined });
+		const mr = mrFixture({
+			base_sha: "baseABC",
+			head_sha: "headXYZ",
+			start_sha: "baseABC",
+		});
+		const res = enrichShaFromMr(ctx, mr);
+		expect(ctx.sourceSha).toBe("envSrc");
+		expect(ctx.targetSha).toBe("baseABC");
+		expect(res).toEqual({
+			sourceShaChanged: false,
+			targetShaChanged: true,
+		});
 	});
 });

@@ -9,6 +9,7 @@
  * `GITLAB_URL` (derive từ `CI_API_V4_URL` nếu self-hosted).
  */
 
+import type { MergeRequestObjectAttributes } from "./types.ts";
 import type { MrContext } from "./gitlab.ts";
 
 /**
@@ -72,6 +73,41 @@ export function mrContextFromEnv(
 		description: "",
 		webUrl: `${env.CI_PROJECT_URL}/-/merge_requests/${mrIid}`,
 	};
+}
+
+/**
+ * Defense-in-depth SHA resolve (D21): enrich `ctx.sourceSha`/`targetSha` từ
+ * GitLab API `diff_refs` khi CI env không cung cấp.
+ *
+ * Layer order (CI env ưu tiên — KHÔNG override):
+ *   1. CI_MERGE_REQUEST_*_BRANCH_SHA  (chính xác nhất, set khi CI env có)
+ *   2. CI_COMMIT_SHA / CI_MERGE_REQUEST_DIFF_BASE_SHA  (D18 fallback)
+ *   3. `fetchMr().diff_refs.head_sha` / `.base_sha`  (D21 fallback — API authoritative)
+ *
+ * Fix BUG: trong merged-result / một số edge-case pipeline, cả D18 env vars
+ * target SHA đều empty → `ctx.targetSha` undefined → `postDiffNote` block toàn bộ
+ * inline comments với cùng error, AI stall + retry vô ích.
+ *
+ * @returns flag từng SHA đã được enrich (để caller log debug).
+ */
+export function enrichShaFromMr(
+	ctx: MrContext,
+	mr: MergeRequestObjectAttributes,
+): { sourceShaChanged: boolean; targetShaChanged: boolean } {
+	const refs = mr.diff_refs;
+	let sourceShaChanged = false;
+	let targetShaChanged = false;
+	if (refs) {
+		if (!ctx.sourceSha && refs.head_sha) {
+			ctx.sourceSha = refs.head_sha;
+			sourceShaChanged = true;
+		}
+		if (!ctx.targetSha && refs.base_sha) {
+			ctx.targetSha = refs.base_sha;
+			targetShaChanged = true;
+		}
+	}
+	return { sourceShaChanged, targetShaChanged };
 }
 
 /**
