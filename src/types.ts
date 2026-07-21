@@ -69,6 +69,20 @@ export interface MergeRequestObjectAttributes {
 	merge_commit_sha?: string | null;
 	merge_status?: string;
 	detailed_merge_status?: string;
+	/**
+	 * Authoritative SHAs cho DiffNote position — GitLab UI dùng chính fields này
+	 * khi user comment trong Changes tab. Luôn populated (sau khi diff được tính).
+	 *
+	 * Docs: https://docs.gitlab.com/api/merge_requests/ (diff_refs object)
+	 */
+	diff_refs?: {
+		/** Merge base commit (common ancestor của source + target). */
+		base_sha: string;
+		/** HEAD của source branch (diff end point). */
+		head_sha: string;
+		/** Commit trên target branch dùng làm diff start point (thường == base_sha). */
+		start_sha: string;
+	};
 	url: string;
 	last_commit?: LastCommit;
 	source?: GitLabProject;
